@@ -27,7 +27,9 @@ This project is an early, contract-tested implementation based on API behavior o
 self-hosted Gitee Project Wiki installation. Gitee does not currently document these endpoints
 as part of its public v5 OpenAPI. Revision bodies containing the observed ProseMirror-style JSON
 document are converted to Markdown; already-Markdown bodies pass through unchanged. Test against
-a non-production space before relying on it.
+a non-production space before relying on it. The converter uses an explicit Gitee node/mark
+registry inspired by the official ProseMirror Markdown serializer, so Gitee-specific schema names
+remain isolated from Markdown escaping and rendering state.
 
 ## Installation
 
@@ -166,7 +168,9 @@ adding support for another Gitee release.
 ## License
 
 MIT. This project borrows command and configuration concepts—not implementation code—from the
-MIT-licensed `confluence-markdown-exporter` project.
+MIT-licensed `confluence-markdown-exporter` project. Its serializer architecture is informed by
+the MIT-licensed official
+[`prosemirror-markdown`](https://github.com/ProseMirror/prosemirror-markdown) project.
 
 Maintainers can follow the [release process](docs/releasing.md) for versioning and automated PyPI
 publishing.

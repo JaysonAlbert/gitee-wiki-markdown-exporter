@@ -19,8 +19,11 @@ History pagination uses one-based `offset=1`, matching the observed gateway beha
 Some installations label a revision as `text` while `data.content` is a JSON object whose
 `default` property contains a ProseMirror-style `doc`. The exporter recognizes that exact envelope
 and renders common headings, paragraphs, marks and links, lists, blockquotes, code blocks, layout
-containers, and tables as Markdown. Invalid or unrecognized JSON remains plain text rather than
-being guessed at. Binary YDoc state is not supported.
+containers, and tables as Markdown. Markdown-significant characters in text and link targets are
+escaped, adjacent text fragments with the same marks are serialized as one marked span, and code
+fences expand when their content contains backticks. Unknown container nodes retain recognized
+descendants. Invalid or unrecognized top-level JSON remains plain text rather than being guessed
+at. Binary YDoc state is not supported.
 
 The exporter accepts envelopes where `data` contains the resource. An explicit non-zero `code` or
 `success: false` is an error. HTTP errors are reported with method, sanitized URL, and status only.

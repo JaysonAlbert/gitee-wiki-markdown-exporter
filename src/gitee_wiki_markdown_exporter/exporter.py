@@ -30,7 +30,7 @@ from gitee_wiki_markdown_exporter.models import (
 from gitee_wiki_markdown_exporter.paths import render_attachment_path, render_page_path
 from gitee_wiki_markdown_exporter.rich_text import render_wiki_content
 
-_MARKDOWN_RENDERER_VERSION = 2
+_MARKDOWN_RENDERER_VERSION = 3
 
 
 class WikiReader(Protocol):

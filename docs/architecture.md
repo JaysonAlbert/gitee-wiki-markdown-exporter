@@ -22,8 +22,10 @@ CLI
   redaction.
 - `exporter` owns selection, revision comparison, attachment localization, stale-file decisions,
   and run summaries.
-- `rich_text` converts the observed ProseMirror-style JSON document into Markdown and preserves
-  unrecognized or already-Markdown text verbatim.
+- `rich_text` separates envelope detection from Markdown serialization. A serializer registry maps
+  observed Gitee node and mark names to handlers, while a per-document state owns CommonMark
+  escaping and nested rendering. Unknown container nodes preserve their supported descendants;
+  unrecognized or already-Markdown top-level text still passes through verbatim.
 - `paths` owns cross-platform safe filenames and template expansion.
 - `manifest` owns the versioned on-disk synchronization contract.
 - `cli` performs parsing and rendering only; it does not contain synchronization rules.
@@ -53,6 +55,13 @@ or non-success envelope fails the run instead of silently producing incomplete M
 
 New endpoint variants require a captured, sanitized fixture and a contract test. Write endpoints
 are outside the exporter boundary.
+
+The rich-text registry follows the extension model of the official
+[`prosemirror-markdown`](https://github.com/ProseMirror/prosemirror-markdown) serializer without
+depending on a JavaScript runtime. It is intentionally configured for the observed Gitee schema
+(`bulletList`, `codeBlock`, `layoutRow`, and related names), rather than assuming that every
+ProseMirror installation shares one JSON schema. Markdown-to-ProseMirror parsing and publishing
+content back to Gitee remain outside the read-only exporter boundary.
 
 ## Security
 

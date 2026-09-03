@@ -240,6 +240,23 @@ def test_legacy_manifest_page_is_rerendered_without_revision_change(tmp_path: Pa
     assert page_path.read_text(encoding="utf-8") == "# Home\n\nConverted\n"
 
 
+def test_previous_renderer_version_is_rerendered_without_revision_change(tmp_path: Path) -> None:
+    client = FakeWikiClient()
+    output = tmp_path / "mirror"
+    exporter = WikiExporter(client=client, settings=settings(output))
+    exporter.sync_pages("ENG", (1,))
+    manifest_path = output / "gitee-wiki-lock.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["spaces"]["ENG"]["pages"]["1"]["rendererVersion"] = 2
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    client.revision_reads.clear()
+
+    result = exporter.sync_pages("ENG", (1,))
+
+    assert result.updated == 1
+    assert client.revision_reads == [1]
+
+
 def test_manifest_does_not_persist_attachment_query_credentials(tmp_path: Path) -> None:
     client = FakeWikiClient()
     signed_url = "demo/2/diagram.png?sig=new-signed-secret"

@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+- Refactor Gitee ProseMirror rendering around schema-driven node and mark registries.
+- Escape Markdown-significant text and link delimiters, coalesce fragmented marks, and refresh
+  mirrors produced by the previous renderer.
+
 ## 0.1.1 - 2026-09-03
 
 - Render observed Gitee ProseMirror-style revision JSON as Markdown instead of exporting raw JSON.
