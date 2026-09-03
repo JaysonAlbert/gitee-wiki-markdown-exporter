@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gitee-wiki-markdown-exporter"
+version = "0.1.0"
+description = "Export Gitee Project Wiki spaces and pages to an incremental local Markdown mirror."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "JaysonAlbert", email = "momeijw@gmail.com" }]
+keywords = ["gitee", "wiki", "markdown", "export", "backup", "incremental"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Documentation",
+]
+dependencies = [
+  "httpx>=0.27,<1",
+  "platformdirs>=4,<5",
+  "typer>=0.12,<1",
+]
+
+[project.urls]
+Homepage = "https://github.com/JaysonAlbert/gitee-wiki-markdown-exporter"
+Documentation = "https://github.com/JaysonAlbert/gitee-wiki-markdown-exporter#readme"
+Source = "https://github.com/JaysonAlbert/gitee-wiki-markdown-exporter"
+Tracker = "https://github.com/JaysonAlbert/gitee-wiki-markdown-exporter/issues"
+
+[project.scripts]
+gitee-wiki-markdown-exporter = "gitee_wiki_markdown_exporter.cli:app"
+gw-export = "gitee_wiki_markdown_exporter.cli:app"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-cov>=6,<7",
+  "ruff>=0.12,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gitee_wiki_markdown_exporter"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "UP"]

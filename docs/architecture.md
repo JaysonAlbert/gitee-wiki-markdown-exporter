@@ -1,0 +1,69 @@
+# Architecture
+
+## Goal
+
+Maintain a deterministic local Markdown mirror of selected Gitee Project Wiki content. A repeated
+run must transfer only changed content, reconcile tree moves and deletions, and never expose the
+Wiki token in output or exceptions.
+
+## Boundaries
+
+```text
+CLI
+  -> configuration
+  -> export service
+       -> Gitee Project Wiki client
+       -> path renderer
+       -> revision manifest
+       -> transactional output directory
+```
+
+- `client` owns HTTP authentication, endpoint paths, response validation, pagination, and secret
+  redaction.
+- `exporter` owns selection, revision comparison, attachment localization, stale-file decisions,
+  and run summaries.
+- `paths` owns cross-platform safe filenames and template expansion.
+- `manifest` owns the versioned on-disk synchronization contract.
+- `cli` performs parsing and rendering only; it does not contain synchronization rules.
+
+## Synchronization algorithm
+
+1. Resolve each requested space and read its page tree.
+2. Flatten selected roots into page records with stable page IDs and ancestor titles.
+3. Read the latest revision ID and attachment metadata for each selected page.
+4. Compare `(page ID, revision, title, rendered path, attachment metadata)` with the previous
+   manifest.
+5. Build a staging output beside the current output, initially populated from the previous mirror.
+6. Download changed page bodies and attachment bytes into staging, reuse unchanged attachments,
+   and move unchanged pages whose tree path changed.
+7. For complete-space selections, remove stale managed files when cleanup is enabled.
+8. Write the next manifest and replace the output directory. If any pre-swap step fails, discard
+   staging and preserve the previous mirror. Backup deletion after a committed swap is best-effort.
+
+The manifest is an optimization and cleanup authority, not a remote source of truth. Gitee page
+IDs and revisions remain authoritative.
+
+## Compatibility policy
+
+The Project Wiki API is treated as a versioned external contract even though it is not part of the
+public Gitee v5 OpenAPI. Parsing accepts only explicitly observed response variants. A missing field
+or non-success envelope fails the run instead of silently producing incomplete Markdown.
+
+New endpoint variants require a captured, sanitized fixture and a contract test. Write endpoints
+are outside the exporter boundary.
+
+## Security
+
+- Prefer an environment variable for the bearer token.
+- Never include authorization headers or raw tokens in logs, manifests, JSON output, or exceptions.
+- Reject tree-derived paths that escape the configured output root.
+- Bound attachment sizes before buffering them in memory.
+- Follow redirects only within the configured Gitee host by default.
+
+## Non-goals for 0.1
+
+- publishing Markdown back to Gitee;
+- migrating Confluence history;
+- decoding non-text collaborative YDoc bodies;
+- exporting every tenant-visible space without an explicit allowlist;
+- providing a daemon or scheduler—the `sync` command is the schedulable primitive.
