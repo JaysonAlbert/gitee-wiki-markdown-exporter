@@ -16,6 +16,7 @@ from typing import Any, Protocol
 from urllib.parse import urlparse
 from uuid import uuid4
 
+from gitee_wiki_markdown_exporter.client import GiteeWikiError
 from gitee_wiki_markdown_exporter.config import ExportSettings
 from gitee_wiki_markdown_exporter.manifest import load_manifest, write_manifest
 from gitee_wiki_markdown_exporter.models import (
@@ -103,12 +104,13 @@ class WikiExporter:
         next_manifest = copy.deepcopy(previous)
         staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.staging-", dir=output.parent))
         outcomes: list[PageOutcome] = []
+        errors: list[str] = []
         deleted = 0
         try:
             if output.exists():
                 shutil.copytree(output, staging, dirs_exist_ok=True, copy_function=_link_or_copy)
             for selection in selections:
-                selection_outcomes, selection_deleted = self._sync_selection(
+                selection_outcomes, selection_deleted, selection_errors = self._sync_selection(
                     staging=staging,
                     previous=previous,
                     next_manifest=next_manifest,
@@ -116,6 +118,7 @@ class WikiExporter:
                 )
                 outcomes.extend(selection_outcomes)
                 deleted += selection_deleted
+                errors.extend(selection_errors)
             write_manifest(staging / self.settings.lockfile_name, next_manifest)
             _prune_empty_directories(staging)
             _replace_directory(staging=staging, output=output)
@@ -126,13 +129,14 @@ class WikiExporter:
             raise ExportError(str(error)) from error
 
         return SyncResult(
-            status="ok",
+            status="partial" if errors else "ok",
             output_path=output,
             updated=sum(outcome.status == "updated" for outcome in outcomes),
             unchanged=sum(outcome.status == "unchanged" for outcome in outcomes),
             moved=sum(outcome.status == "moved" for outcome in outcomes),
             deleted=deleted,
             pages=tuple(outcomes),
+            errors=tuple(errors),
         )
 
     def _sync_selection(
@@ -142,7 +146,7 @@ class WikiExporter:
         previous: dict[str, Any],
         next_manifest: dict[str, Any],
         selection: Selection,
-    ) -> tuple[list[PageOutcome], int]:
+    ) -> tuple[list[PageOutcome], int, list[str]]:
         space = self.client.get_space(selection.space_key)
         tree = self.client.get_tree(space.id)
         all_candidates = _flatten_tree(tree)
@@ -169,6 +173,7 @@ class WikiExporter:
             next_space["pages"] = next_pages
 
         outcomes: list[PageOutcome] = []
+        errors: list[str] = []
         selected_ids: set[str] = set()
         for candidate in candidates:
             page_key = str(candidate.page_id)
@@ -184,7 +189,7 @@ class WikiExporter:
                 page_title=candidate.title,
                 page_id=candidate.page_id,
             )
-            status, entry = self._sync_page(
+            status, entry, page_errors = self._sync_page(
                 staging=staging,
                 space=space,
                 candidate=candidate,
@@ -193,6 +198,7 @@ class WikiExporter:
                 old_entry=old_entry,
             )
             next_pages[page_key] = entry
+            errors.extend(page_errors)
             outcomes.append(
                 PageOutcome(
                     page_id=candidate.page_id,
@@ -211,7 +217,7 @@ class WikiExporter:
                 next_pages.pop(page_key, None)
                 deleted += 1
         next_spaces[space.key] = next_space
-        return outcomes, deleted
+        return outcomes, deleted, errors
 
     def _sync_page(
         self,
@@ -222,7 +228,7 @@ class WikiExporter:
         revision: int,
         desired_path: Path,
         old_entry: dict[str, Any],
-    ) -> tuple[str, dict[str, Any]]:
+    ) -> tuple[str, dict[str, Any], list[str]]:
         old_path = _manifest_path(old_entry.get("path"))
         old_attachments = old_entry.get("attachments", [])
         old_revision = str(old_entry.get("revision", ""))
@@ -244,7 +250,7 @@ class WikiExporter:
         if unchanged and old_path == desired_path:
             entry = copy.deepcopy(old_entry)
             entry.update(_page_metadata(candidate, revision, desired_path))
-            return "unchanged", entry
+            return "unchanged", entry, []
         if unchanged and old_path is not None:
             entry = self._move_unchanged_page(
                 staging=staging,
@@ -254,10 +260,11 @@ class WikiExporter:
                 desired_path=desired_path,
                 old_attachments=old_attachments,
             )
-            return "moved", entry
+            return "moved", entry, []
 
         page = self.client.get_revision(space.id, candidate.page_id, revision)
         attachment_entries: list[dict[str, object]] = []
+        errors: list[str] = []
         replacements: dict[str, str] = {}
         old_by_id = _attachment_entries_by_id(old_attachments)
         for attachment in attachments:
@@ -272,6 +279,13 @@ class WikiExporter:
             old_attachment_path = (
                 _manifest_path(old_attachment.get("path")) if old_attachment else None
             )
+            sources = _attachment_source_variants(self.client.base_url, attachment.url)
+            if old_attachment is not None and isinstance(old_attachment.get("urlPath"), str):
+                sources.update(
+                    _attachment_source_variants(
+                        self.client.base_url, str(old_attachment["urlPath"])
+                    )
+                )
             if (
                 old_attachment is not None
                 and old_attachment_path is not None
@@ -282,9 +296,20 @@ class WikiExporter:
                 attachment_entry = copy.deepcopy(old_attachment)
                 attachment_entry.update(_attachment_metadata(attachment, attachment_path))
             else:
-                content, content_type = self.client.download_attachment(
-                    attachment.url, max_bytes=self.settings.max_attachment_bytes
-                )
+                try:
+                    content, content_type = self.client.download_attachment(
+                        attachment.url, max_bytes=self.settings.max_attachment_bytes
+                    )
+                except GiteeWikiError as error:
+                    remote_link = self.client.base_url.rstrip("/") + _attachment_url_path(
+                        attachment.url
+                    )
+                    for source in sources:
+                        replacements[source] = remote_link
+                    errors.append(
+                        f"page {candidate.page_id} attachment {attachment.id} skipped: {error}"
+                    )
+                    continue
                 _atomic_write_bytes(staging / attachment_path, content)
                 attachment_entry = _attachment_metadata(attachment, attachment_path)
                 attachment_entry.update(
@@ -295,13 +320,8 @@ class WikiExporter:
                     }
                 )
             relative_link = _relative_link(desired_path.parent, attachment_path)
-            for source in _attachment_source_variants(self.client.base_url, attachment.url):
+            for source in sources:
                 replacements[source] = relative_link
-            if old_attachment is not None and isinstance(old_attachment.get("urlPath"), str):
-                for source in _attachment_source_variants(
-                    self.client.base_url, str(old_attachment["urlPath"])
-                ):
-                    replacements[source] = relative_link
             attachment_entries.append(attachment_entry)
 
         body = _rewrite_links(render_wiki_content(page.content), replacements)
@@ -332,7 +352,7 @@ class WikiExporter:
             and old_path != desired_path
             and attachments_unchanged
         )
-        return ("moved" if moved else "updated"), entry
+        return ("moved" if moved else "updated"), entry, errors
 
     def _move_unchanged_page(
         self,
@@ -457,9 +477,22 @@ def _render_document(
 
 
 def _attachment_source_variants(base_url: str, url: str) -> set[str]:
+    parsed = urlparse(url)
     relative = _attachment_url_path(url)
-    source_path = urlparse(url).path
-    return {url, source_path, relative, base_url.rstrip("/") + relative} - {""}
+    suffix = (f"?{parsed.query}" if parsed.query else "") + (
+        f"#{parsed.fragment}" if parsed.fragment else ""
+    )
+    source_path = parsed.path
+    absolute = base_url.rstrip("/") + relative
+    return {
+        url,
+        source_path,
+        source_path + suffix,
+        relative,
+        relative + suffix,
+        absolute,
+        absolute + suffix,
+    } - {""}
 
 
 def _attachment_url_path(url: str) -> str:
@@ -470,16 +503,26 @@ def _attachment_url_path(url: str) -> str:
 
 
 def _rewrite_links(content: str, replacements: dict[str, str]) -> str:
-    for source in sorted(replacements, key=len, reverse=True):
+    placeholders: list[tuple[str, str]] = []
+    for index, source in enumerate(sorted(replacements, key=len, reverse=True)):
+        placeholder = f"\x00gwme-attachment-link-{index}\x00"
+        replacement = replacements[source]
         if "?" in source or "#" in source:
-            content = content.replace(source, replacements[source])
+            updated = content.replace(source, placeholder)
+            if updated != content:
+                placeholders.append((placeholder, replacement))
+            content = updated
             continue
         suffix = r"(?:\?[^)\s<>\"']*)?(?:#[^)\s<>\"']*)?"
-        content = re.sub(
+        content, count = re.subn(
             re.escape(source) + suffix,
-            lambda _match, replacement=replacements[source]: replacement,
+            placeholder,
             content,
         )
+        if count:
+            placeholders.append((placeholder, replacement))
+    for placeholder, replacement in placeholders:
+        content = content.replace(placeholder, replacement)
     return content
 
 

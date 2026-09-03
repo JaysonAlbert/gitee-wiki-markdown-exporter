@@ -7,6 +7,8 @@ All notable changes to this project will be documented in this file.
 - Refactor Gitee ProseMirror rendering around schema-driven node and mark registries.
 - Escape Markdown-significant text and link delimiters, coalesce fragmented marks, and refresh
   mirrors produced by the previous renderer.
+- Continue exporting Markdown when individual attachment downloads fail, report a partial result,
+  and retry skipped attachments on later runs.
 
 ## 0.1.1 - 2026-09-03
 

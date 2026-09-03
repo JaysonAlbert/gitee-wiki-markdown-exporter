@@ -137,6 +137,8 @@ not changed.
   bytes;
 - changed revision or attachment metadata: refresh the Markdown page while reusing unchanged
   attachment files;
+- failed attachment download: continue exporting the page, report the run as `partial`, preserve a
+  query-free link to the remote attachment, and retry the attachment on the next synchronization;
 - renamed or moved page: update its generated title/path and reuse unchanged attachments;
 - deleted page during a complete-space sync: remove its managed local files when
   `cleanup_stale` is enabled;
@@ -147,6 +149,11 @@ size, and content type). If a Gitee version replaces bytes without changing any 
 the change cannot be detected without forcing a full download.
 
 Only files recorded in the lockfile are eligible for cleanup.
+
+Skipped attachments are not recorded as successfully downloaded in `gitee-wiki-lock.json`. Human
+output prints a warning for each skipped attachment; `--json` includes the same sanitized messages
+in `errors`. A partial export still exits `0` because the requested Markdown mirror was committed,
+while `status: "partial"` lets automation distinguish it from a complete `status: "ok"` run.
 
 ## Compatibility
 
