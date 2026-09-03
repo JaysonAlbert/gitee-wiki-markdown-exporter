@@ -35,6 +35,7 @@ history.
   boundaries, and transport-error sanitization.
 - `exporter.py`: page selection, incremental decisions, attachment localization, managed cleanup,
   staging, and output replacement.
+- `rich_text.py`: observed Gitee rich-text JSON to Markdown rendering with plain-text passthrough.
 - `paths.py`: filename normalization and cross-platform relative-path safety.
 - `manifest.py`: versioned lockfile loading and atomic writing.
 - `models.py`: typed values exchanged across boundaries.

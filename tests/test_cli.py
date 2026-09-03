@@ -12,7 +12,7 @@ def test_version_exposes_package_version() -> None:
     result = runner.invoke(app, ["--version"])
 
     assert result.exit_code == 0
-    assert result.stdout == "gitee-wiki-markdown-exporter 0.1.0\n"
+    assert result.stdout == "gitee-wiki-markdown-exporter 0.1.1\n"
 
 
 def test_config_show_redacts_inline_token(tmp_path: Path) -> None:

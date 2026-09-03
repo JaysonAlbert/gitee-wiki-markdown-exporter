@@ -25,7 +25,9 @@ The shorter `gw-export` alias provides the same commands.
 
 This project is an early, contract-tested implementation based on API behavior observed on a
 self-hosted Gitee Project Wiki installation. Gitee does not currently document these endpoints
-as part of its public v5 OpenAPI. Test against a non-production space before relying on it.
+as part of its public v5 OpenAPI. Revision bodies containing the observed ProseMirror-style JSON
+document are converted to Markdown; already-Markdown bodies pass through unchanged. Test against
+a non-production space before relying on it.
 
 ## Installation
 
@@ -125,7 +127,9 @@ Example cron entry:
 ## Incremental behavior
 
 The exporter keeps `gitee-wiki-lock.json` in the output root. For every page it records the Gitee
-page ID, current revision, local path, tree parent, and downloaded attachments.
+page ID, current revision, Markdown renderer version, local path, tree parent, and downloaded
+attachments. A renderer upgrade refreshes the affected page once even when its Gitee revision has
+not changed.
 
 - unchanged revision, title, path, and attachment metadata: skip the page body and attachment
   bytes;
