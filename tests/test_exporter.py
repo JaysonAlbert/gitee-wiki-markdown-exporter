@@ -79,6 +79,167 @@ def test_first_sync_exports_tree_localizes_attachments_and_writes_manifest(tmp_p
     assert manifest["spaces"]["ENG"]["pages"]["2"]["revision"] == "20"
 
 
+def test_rich_text_revision_is_rendered_as_markdown(tmp_path: Path) -> None:
+    client = FakeWikiClient()
+    client.bodies[1] = json.dumps(
+        {
+            "default": {
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "heading",
+                        "attrs": {"level": 2},
+                        "content": [{"type": "text", "text": "Overview"}],
+                    },
+                    {
+                        "type": "layout",
+                        "content": [
+                            {
+                                "type": "layoutRow",
+                                "content": [
+                                    {
+                                        "type": "paragraph",
+                                        "content": [
+                                            {
+                                                "type": "text",
+                                                "text": "Important",
+                                                "marks": [{"type": "bold"}],
+                                            },
+                                            {"type": "text", "text": " "},
+                                            {
+                                                "type": "text",
+                                                "text": "Docs",
+                                                "marks": [
+                                                    {
+                                                        "type": "link",
+                                                        "attrs": {
+                                                            "href": "https://example.com/docs"
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                        ],
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "type": "bulletList",
+                        "content": [
+                            {
+                                "type": "listItem",
+                                "content": [
+                                    {
+                                        "type": "paragraph",
+                                        "content": [{"type": "text", "text": "First"}],
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "type": "table",
+                        "content": [
+                            {
+                                "type": "tableRow",
+                                "content": [
+                                    {
+                                        "type": "tableCell",
+                                        "content": [
+                                            {
+                                                "type": "paragraph",
+                                                "content": [{"type": "text", "text": "Name"}],
+                                            }
+                                        ],
+                                    },
+                                    {
+                                        "type": "tableCell",
+                                        "content": [
+                                            {
+                                                "type": "paragraph",
+                                                "content": [{"type": "text", "text": "Owner"}],
+                                            }
+                                        ],
+                                    },
+                                ],
+                            },
+                            {
+                                "type": "tableRow",
+                                "content": [
+                                    {
+                                        "type": "tableCell",
+                                        "content": [
+                                            {
+                                                "type": "paragraph",
+                                                "content": [{"type": "text", "text": "TITANS"}],
+                                            }
+                                        ],
+                                    },
+                                    {
+                                        "type": "tableCell",
+                                        "content": [
+                                            {
+                                                "type": "paragraph",
+                                                "content": [{"type": "text", "text": "Team"}],
+                                            }
+                                        ],
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                ],
+            }
+        }
+    )
+
+    WikiExporter(client=client, settings=settings(tmp_path / "mirror")).sync_pages("ENG", (1,))
+
+    assert (tmp_path / "mirror/Engineering/Home-1.md").read_text(encoding="utf-8") == (
+        "# Home\n\n"
+        "## Overview\n\n"
+        "**Important** [Docs](https://example.com/docs)\n\n"
+        "- First\n\n"
+        "| Name | Owner |\n"
+        "| --- | --- |\n"
+        "| TITANS | Team |\n"
+    )
+
+
+def test_legacy_manifest_page_is_rerendered_without_revision_change(tmp_path: Path) -> None:
+    client = FakeWikiClient()
+    output = tmp_path / "mirror"
+    exporter = WikiExporter(client=client, settings=settings(output))
+    exporter.sync_pages("ENG", (1,))
+    page_path = output / "Engineering/Home-1.md"
+    page_path.write_text('# Home\n\n{"default":{"type":"doc"}}\n', encoding="utf-8")
+    manifest_path = output / "gitee-wiki-lock.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["spaces"]["ENG"]["pages"]["1"].pop("rendererVersion")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    client.bodies[1] = json.dumps(
+        {
+            "default": {
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [{"type": "text", "text": "Converted"}],
+                    }
+                ],
+            }
+        }
+    )
+    client.revision_reads.clear()
+
+    result = exporter.sync_pages("ENG", (1,))
+
+    assert result.updated == 1
+    assert client.revision_reads == [1]
+    assert page_path.read_text(encoding="utf-8") == "# Home\n\nConverted\n"
+
+
 def test_manifest_does_not_persist_attachment_query_credentials(tmp_path: Path) -> None:
     client = FakeWikiClient()
     signed_url = "demo/2/diagram.png?sig=new-signed-secret"

@@ -28,6 +28,9 @@ from gitee_wiki_markdown_exporter.models import (
     TreeNode,
 )
 from gitee_wiki_markdown_exporter.paths import render_attachment_path, render_page_path
+from gitee_wiki_markdown_exporter.rich_text import render_wiki_content
+
+_MARKDOWN_RENDERER_VERSION = 2
 
 
 class WikiReader(Protocol):
@@ -232,6 +235,7 @@ class WikiExporter:
         unchanged = (
             self.settings.skip_unchanged
             and old_revision == str(revision)
+            and old_entry.get("rendererVersion") == _MARKDOWN_RENDERER_VERSION
             and old_entry.get("title") == candidate.title
             and old_path is not None
             and (staging / old_path).is_file()
@@ -300,7 +304,7 @@ class WikiExporter:
                     replacements[source] = relative_link
             attachment_entries.append(attachment_entry)
 
-        body = _rewrite_links(page.content, replacements)
+        body = _rewrite_links(render_wiki_content(page.content), replacements)
         document = _render_document(
             body,
             title=candidate.title,
@@ -419,6 +423,7 @@ def _page_metadata(candidate: PageCandidate, revision: int, desired_path: Path) 
         "title": candidate.title,
         "parentId": candidate.parent_id,
         "revision": str(revision),
+        "rendererVersion": _MARKDOWN_RENDERER_VERSION,
         "path": desired_path.as_posix(),
         "attachments": [],
     }
