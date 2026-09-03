@@ -34,8 +34,11 @@ Python 3.10 or newer is required.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install "git+https://github.com/JaysonAlbert/gitee-wiki-markdown-exporter.git"
+pip install gitee-wiki-markdown-exporter
 ```
+
+PyPI releases are published from versioned GitHub Releases. Until the first release is available,
+install the current development version from GitHub.
 
 For local development:
 
@@ -163,3 +166,6 @@ adding support for another Gitee release.
 
 MIT. This project borrows command and configuration concepts—not implementation code—from the
 MIT-licensed `confluence-markdown-exporter` project.
+
+Maintainers can follow the [release process](docs/releasing.md) for versioning and automated PyPI
+publishing.
