@@ -37,9 +37,6 @@ source .venv/bin/activate
 pip install gitee-wiki-markdown-exporter
 ```
 
-PyPI releases are published from versioned GitHub Releases. Until the first release is available,
-install the current development version from GitHub.
-
 For local development:
 
 ```bash
