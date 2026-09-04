@@ -57,6 +57,12 @@ details into the exporter.
 
 - Prefer `GITEE_PROJECT_WIKI_ACCESS_TOKEN` or another configured environment variable. Never
   commit tokens or credential-bearing `app_data.json` files.
+- Keep this public repository free of employer-private domains, tenant identifiers, space or page
+  identifiers, system names, document titles, page bodies, and attachment metadata. Tests and
+  examples must use neutral synthetic values such as `example.com`.
+- Live validation may use an explicitly supplied private Wiki only through read-only calls. Keep
+  its configuration and exported content outside the repository, and never promote captured
+  payloads into fixtures, logs, documentation, or build artifacts.
 - Never emit bearer tokens, authorization headers, tenant-sensitive payloads, page bodies, or real
   signed attachment URLs in errors, logs, JSON summaries, fixtures, or manifests. Sanitized fake
   credentials are allowed in regression tests.

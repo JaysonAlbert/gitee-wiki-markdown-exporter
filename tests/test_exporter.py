@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from gitee_wiki_markdown_exporter.client import GiteeWikiError
 from gitee_wiki_markdown_exporter.config import ExportSettings
 from gitee_wiki_markdown_exporter.exporter import ExportError, WikiExporter, _replace_directory
 from gitee_wiki_markdown_exporter.models import Attachment, PageRevision, Space, TreeNode
@@ -34,6 +35,7 @@ class FakeWikiClient:
             2: (Attachment(99, "diagram.png", "demo/2/diagram.png", size=3),),
         }
         self.fail_page: int | None = None
+        self.fail_attachment_urls: set[str] = set()
 
     def get_space(self, space_key: str) -> Space:
         return Space(34, space_key, "Engineering")
@@ -58,6 +60,10 @@ class FakeWikiClient:
     def download_attachment(self, url: str, *, max_bytes: int) -> tuple[bytes, str]:
         assert max_bytes >= 3
         self.download_reads.append(url)
+        if url in self.fail_attachment_urls:
+            raise GiteeWikiError(
+                "GET https://gitee.example.com/wiki-static/failed failed: HTTP 500"
+            )
         return url.encode("utf-8")[-3:], "image/png"
 
 
@@ -240,6 +246,23 @@ def test_legacy_manifest_page_is_rerendered_without_revision_change(tmp_path: Pa
     assert page_path.read_text(encoding="utf-8") == "# Home\n\nConverted\n"
 
 
+def test_previous_renderer_version_is_rerendered_without_revision_change(tmp_path: Path) -> None:
+    client = FakeWikiClient()
+    output = tmp_path / "mirror"
+    exporter = WikiExporter(client=client, settings=settings(output))
+    exporter.sync_pages("ENG", (1,))
+    manifest_path = output / "gitee-wiki-lock.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["spaces"]["ENG"]["pages"]["1"]["rendererVersion"] = 2
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    client.revision_reads.clear()
+
+    result = exporter.sync_pages("ENG", (1,))
+
+    assert result.updated == 1
+    assert client.revision_reads == [1]
+
+
 def test_manifest_does_not_persist_attachment_query_credentials(tmp_path: Path) -> None:
     client = FakeWikiClient()
     signed_url = "demo/2/diagram.png?sig=new-signed-secret"
@@ -260,6 +283,41 @@ def test_manifest_does_not_persist_attachment_query_credentials(tmp_path: Path) 
     assert "signed-secret" not in document
 
 
+def test_failed_attachment_is_reported_and_page_export_continues(tmp_path: Path) -> None:
+    client = FakeWikiClient()
+    failed_url = "demo/2/diagram.png?sig=sensitive-value"
+    client.attachments[2] = (Attachment(99, "diagram.png", failed_url, size=3),)
+    client.bodies[2] = f"![diagram](/wiki-static/{failed_url})"
+    client.fail_attachment_urls.add(failed_url)
+    output = tmp_path / "mirror"
+    exporter = WikiExporter(client=client, settings=settings(output))
+
+    result = exporter.sync_spaces(("ENG",))
+
+    assert result.status == "partial"
+    assert result.errors == (
+        "page 2 attachment 99 skipped: "
+        "GET https://gitee.example.com/wiki-static/failed failed: HTTP 500",
+    )
+    assert (output / "Engineering/Home/Runbook-2.md").read_text(encoding="utf-8") == (
+        "# Runbook\n\n![diagram](https://gitee.example.com/wiki-static/demo/2/diagram.png)\n"
+    )
+    assert not (output / "Engineering/Home/Runbook/99.png").exists()
+    manifest = json.loads((output / "gitee-wiki-lock.json").read_text(encoding="utf-8"))
+    assert manifest["spaces"]["ENG"]["pages"]["2"]["attachments"] == []
+
+    client.fail_attachment_urls.clear()
+    client.download_reads.clear()
+    retry_result = exporter.sync_spaces(("ENG",))
+
+    assert retry_result.status == "ok"
+    assert client.download_reads == [failed_url]
+    assert (output / "Engineering/Home/Runbook/99.png").read_bytes() == b"lue"
+    assert (output / "Engineering/Home/Runbook-2.md").read_text(encoding="utf-8") == (
+        "# Runbook\n\n![diagram](Runbook/99.png)\n"
+    )
+
+
 def test_second_sync_polls_metadata_but_skips_unchanged_page_and_attachment_bytes(
     tmp_path: Path,
 ) -> None:
@@ -278,6 +336,26 @@ def test_second_sync_polls_metadata_but_skips_unchanged_page_and_attachment_byte
     assert client.revision_reads == []
     assert client.attachment_reads == [1, 2]
     assert client.download_reads == []
+
+
+def test_repeated_unchanged_sync_keeps_attachments_reusable(tmp_path: Path) -> None:
+    client = FakeWikiClient()
+    output = tmp_path / "mirror"
+    exporter = WikiExporter(client=client, settings=settings(output))
+    exporter.sync_spaces(("ENG",))
+
+    exporter.sync_spaces(("ENG",))
+    client.revision_reads.clear()
+    client.download_reads.clear()
+
+    result = exporter.sync_spaces(("ENG",))
+
+    assert result.unchanged == 2
+    assert result.updated == 0
+    assert client.revision_reads == []
+    assert client.download_reads == []
+    manifest = json.loads((output / "gitee-wiki-lock.json").read_text(encoding="utf-8"))
+    assert manifest["spaces"]["ENG"]["pages"]["2"]["attachments"][0]["id"] == 99
 
 
 def test_attachment_changes_sync_without_a_page_revision_change(tmp_path: Path) -> None:

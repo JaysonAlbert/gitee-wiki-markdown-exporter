@@ -22,8 +22,10 @@ CLI
   redaction.
 - `exporter` owns selection, revision comparison, attachment localization, stale-file decisions,
   and run summaries.
-- `rich_text` converts the observed ProseMirror-style JSON document into Markdown and preserves
-  unrecognized or already-Markdown text verbatim.
+- `rich_text` separates envelope detection from Markdown serialization. A serializer registry maps
+  observed Gitee node and mark names to handlers, while a per-document state owns CommonMark
+  escaping and nested rendering. Unknown container nodes preserve their supported descendants;
+  unrecognized or already-Markdown top-level text still passes through verbatim.
 - `paths` owns cross-platform safe filenames and template expansion.
 - `manifest` owns the versioned on-disk synchronization contract.
 - `cli` performs parsing and rendering only; it does not contain synchronization rules.
@@ -37,10 +39,13 @@ CLI
    with the previous manifest.
 5. Build a staging output beside the current output, initially populated from the previous mirror.
 6. Download changed page bodies and attachment bytes into staging, reuse unchanged attachments,
-   and move unchanged pages whose tree path changed.
+   and move unchanged pages whose tree path changed. If one attachment download fails, omit that
+   local file and manifest entry, retain a query-free remote link, and record a partial-run error so
+   the next synchronization retries it.
 7. For complete-space selections, remove stale managed files when cleanup is enabled.
-8. Write the next manifest and replace the output directory. If any pre-swap step fails, discard
-   staging and preserve the previous mirror. Backup deletion after a committed swap is best-effort.
+8. Write the next manifest and replace the output directory. Attachment download failures are the
+   only recoverable pre-swap error; any other pre-swap failure discards staging and preserves the
+   previous mirror. Backup deletion after a committed swap is best-effort.
 
 The manifest is an optimization and cleanup authority, not a remote source of truth. Gitee page
 IDs and revisions remain authoritative.
@@ -53,6 +58,13 @@ or non-success envelope fails the run instead of silently producing incomplete M
 
 New endpoint variants require a captured, sanitized fixture and a contract test. Write endpoints
 are outside the exporter boundary.
+
+The rich-text registry follows the extension model of the official
+[`prosemirror-markdown`](https://github.com/ProseMirror/prosemirror-markdown) serializer without
+depending on a JavaScript runtime. It is intentionally configured for the observed Gitee schema
+(`bulletList`, `codeBlock`, `layoutRow`, and related names), rather than assuming that every
+ProseMirror installation shares one JSON schema. Markdown-to-ProseMirror parsing and publishing
+content back to Gitee remain outside the read-only exporter boundary.
 
 ## Security
 
