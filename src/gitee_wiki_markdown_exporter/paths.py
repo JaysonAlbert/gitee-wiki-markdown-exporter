@@ -108,3 +108,38 @@ def render_attachment_path(
     ):
         raise ValueError("attachment template must render a safe relative path")
     return Path(*relative.parts)
+
+
+def render_diagram_path(
+    template: str,
+    *,
+    page_path: Path,
+    page_title: str,
+    diagram_id: int,
+    diagram_page: int,
+) -> Path:
+    """Render one SVG diagram path relative to the output root."""
+    values = {
+        "page_parent_path": page_path.parent.as_posix(),
+        "page_title": safe_segment(page_title),
+        "diagram_id": diagram_id,
+        "diagram_page": diagram_page,
+    }
+    try:
+        rendered = template.format_map(values)
+    except KeyError as error:
+        raise ValueError(f"unsupported diagram path placeholder: {error.args[0]}") from error
+    rendered = re.sub(r"/{2,}", "/", rendered)
+    relative = PurePosixPath(rendered)
+    windows_path = PureWindowsPath(rendered)
+    if (
+        not rendered
+        or "\\" in rendered
+        or relative.is_absolute()
+        or ".." in relative.parts
+        or windows_path.is_absolute()
+        or bool(windows_path.drive)
+        or ".." in windows_path.parts
+    ):
+        raise ValueError("diagram template must render a safe relative path")
+    return Path(*relative.parts)

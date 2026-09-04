@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from gitee_wiki_markdown_exporter.paths import render_page_path, safe_segment
+from gitee_wiki_markdown_exporter.paths import render_diagram_path, render_page_path, safe_segment
 
 
 def test_safe_segment_blocks_traversal_and_windows_reserved_names() -> None:
@@ -30,6 +30,18 @@ def test_render_page_path_rejects_templates_that_escape_output() -> None:
             page_title="Runbook",
             page_id=1,
         )
+
+
+def test_render_diagram_path_uses_stable_component_and_page_numbers() -> None:
+    result = render_diagram_path(
+        "{page_parent_path}/{page_title}/diagram-{diagram_id}-{diagram_page}.svg",
+        page_path=Path("Engineering/Guides/Overview-7.md"),
+        page_title="Overview",
+        diagram_id=501,
+        diagram_page=2,
+    )
+
+    assert result == Path("Engineering/Guides/Overview/diagram-501-2.svg")
 
     with pytest.raises(ValueError, match="relative path"):
         render_page_path(

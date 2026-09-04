@@ -26,25 +26,31 @@ CLI
   observed Gitee node and mark names to handlers, while a per-document state owns CommonMark
   escaping and nested rendering. Unknown container nodes preserve their supported descendants;
   unrecognized or already-Markdown top-level text still passes through verbatim.
+- `diagram` owns local headless-browser rendering of Gitee draw.io component XML. It loads only the
+  Gitee-hosted preview application, blocks subsequent network requests before injecting diagram
+  content, and returns normalized SVG without persisting editable XML.
 - `paths` owns cross-platform safe filenames and template expansion.
 - `manifest` owns the versioned on-disk synchronization contract.
 - `cli` performs parsing and rendering only; it does not contain synchronization rules.
 
 ## Synchronization algorithm
 
-1. Resolve each requested space and read its page tree.
+1. Resolve each requested space. Resolve explicit page-only selections directly from page metadata;
+   for complete spaces or descendant selections, read the page tree and expand non-leaf nodes
+   through the endpoint's `parent` query until the selected hierarchy is complete.
 2. Flatten selected roots into page records with stable page IDs and ancestor titles.
 3. Read the latest revision ID and attachment metadata for each selected page.
-4. Compare `(page ID, revision, renderer version, title, rendered path, attachment metadata)`
-   with the previous manifest.
+4. Compare `(page ID, revision, renderer version, title, rendered path, attachment metadata,
+   diagram state)` with the previous manifest.
 5. Build a staging output beside the current output, initially populated from the previous mirror.
 6. Download changed page bodies and attachment bytes into staging, reuse unchanged attachments,
-   and move unchanged pages whose tree path changed. If one attachment download fails, omit that
-   local file and manifest entry, retain a query-free remote link, and record a partial-run error so
-   the next synchronization retries it.
+   and move unchanged pages whose tree path changed. Fetch draw.io component XML and render every
+   diagram page locally as SVG; only SVG output is persisted. If an attachment or diagram fails,
+   keep exporting the page, record a partial-run error, and leave the item incomplete so the next
+   synchronization retries it.
 7. For complete-space selections, remove stale managed files when cleanup is enabled.
-8. Write the next manifest and replace the output directory. Attachment download failures are the
-   only recoverable pre-swap error; any other pre-swap failure discards staging and preserves the
+8. Write the next manifest and replace the output directory. Attachment and diagram failures are
+   recoverable pre-swap errors; any other pre-swap failure discards staging and preserves the
    previous mirror. Backup deletion after a committed swap is best-effort.
 
 The manifest is an optimization and cleanup authority, not a remote source of truth. Gitee page

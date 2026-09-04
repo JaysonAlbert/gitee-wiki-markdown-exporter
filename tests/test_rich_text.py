@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from gitee_wiki_markdown_exporter.rich_text import render_wiki_content
+from gitee_wiki_markdown_exporter.rich_text import find_diagram_references, render_wiki_content
 
 
 @pytest.mark.parametrize(
@@ -145,3 +145,42 @@ def test_serializes_inline_code_and_link_delimiters_safely() -> None:
     assert render_wiki_content(content) == (
         '`` ` `` and [docs](https://example.com/a\\(b\\) "A \\"title\\"")'
     )
+
+
+def test_extracts_and_renders_multi_page_diagram_as_svg_links() -> None:
+    content = json.dumps(
+        {
+            "default": {
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "diagram",
+                        "attrs": {
+                            "diagram-page-id": "501",
+                            "diagram-update-at": "2026-01-02T03:04:05Z",
+                        },
+                    }
+                ],
+            }
+        }
+    )
+
+    assert find_diagram_references(content) == ((501, "2026-01-02T03:04:05Z"),)
+    assert render_wiki_content(
+        content,
+        diagram_links={501: ("Overview/diagram-501-1.svg", "Overview/diagram-501-2.svg")},
+    ) == (
+        "![draw.io diagram 1](Overview/diagram-501-1.svg)\n\n"
+        "![draw.io diagram 2](Overview/diagram-501-2.svg)"
+    )
+
+
+def test_missing_diagram_svg_is_visible_in_markdown() -> None:
+    content = json.dumps(
+        {
+            "type": "doc",
+            "content": [{"type": "diagram", "attrs": {"diagram-page-id": 501}}],
+        }
+    )
+
+    assert render_wiki_content(content) == "> [!WARNING]\n> draw.io diagram 501 was not exported."

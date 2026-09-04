@@ -6,8 +6,16 @@ import pytest
 
 from gitee_wiki_markdown_exporter.client import GiteeWikiError
 from gitee_wiki_markdown_exporter.config import ExportSettings
+from gitee_wiki_markdown_exporter.diagram import DiagramRenderError
 from gitee_wiki_markdown_exporter.exporter import ExportError, WikiExporter, _replace_directory
-from gitee_wiki_markdown_exporter.models import Attachment, PageRevision, Space, TreeNode
+from gitee_wiki_markdown_exporter.models import (
+    Attachment,
+    DiagramComponent,
+    PageCandidate,
+    PageRevision,
+    Space,
+    TreeNode,
+)
 
 
 class FakeWikiClient:
@@ -36,12 +44,50 @@ class FakeWikiClient:
         }
         self.fail_page: int | None = None
         self.fail_attachment_urls: set[str] = set()
+        self.diagram_components = {
+            501: DiagramComponent(501, '<mxfile><diagram id="one"/></mxfile>')
+        }
+        self.diagram_reads: list[int] = []
+        self.direct_pages: dict[int, object] = {}
 
     def get_space(self, space_key: str) -> Space:
         return Space(34, space_key, "Engineering")
 
     def get_tree(self, _space_id: int) -> tuple[TreeNode, ...]:
         return self.tree
+
+    def get_page(self, _space_id: int, page_id: int):
+        page = self.direct_pages.get(page_id)
+        if page is not None:
+            return page
+
+        def find(
+            nodes: tuple[TreeNode, ...],
+            ancestors: tuple[str, ...] = (),
+            ancestor_ids: tuple[int, ...] = (),
+        ):
+            for node in nodes:
+                if node.page_id == page_id:
+                    return PageCandidate(
+                        node.page_id,
+                        node.title,
+                        node.parent_id,
+                        ancestors,
+                        ancestor_ids,
+                    )
+                found = find(
+                    node.children,
+                    (*ancestors, node.title),
+                    (*ancestor_ids, node.page_id),
+                )
+                if found is not None:
+                    return found
+            return None
+
+        page = find(self.tree)
+        if page is None:
+            raise GiteeWikiError(f"Wiki page {page_id} was not found")
+        return page
 
     def latest_revision(self, _space_id: int, page_id: int) -> int:
         return self.revisions[page_id]
@@ -65,6 +111,44 @@ class FakeWikiClient:
                 "GET https://gitee.example.com/wiki-static/failed failed: HTTP 500"
             )
         return url.encode("utf-8")[-3:], "image/png"
+
+    def get_diagram_component(self, _space_key: str, component_page_id: int) -> DiagramComponent:
+        self.diagram_reads.append(component_page_id)
+        return self.diagram_components[component_page_id]
+
+
+class FakeDiagramRenderer:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.fail = False
+
+    def render(self, xml: str) -> tuple[str, ...]:
+        self.calls.append(xml)
+        if self.fail:
+            raise DiagramRenderError("local browser could not render the diagram")
+        return (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"></svg>',
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"></svg>',
+        )
+
+
+def diagram_body(component_id: int = 501, updated_at: str = "2026-01-02T03:04:05Z") -> str:
+    return json.dumps(
+        {
+            "default": {
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "diagram",
+                        "attrs": {
+                            "diagram-page-id": component_id,
+                            "diagram-update-at": updated_at,
+                        },
+                    }
+                ],
+            }
+        }
+    )
 
 
 def settings(output: Path) -> ExportSettings:
@@ -211,6 +295,146 @@ def test_rich_text_revision_is_rendered_as_markdown(tmp_path: Path) -> None:
         "| --- | --- |\n"
         "| Widget | Team |\n"
     )
+
+
+def test_drawio_diagram_is_mirrored_only_as_svg_and_reused_incrementally(
+    tmp_path: Path,
+) -> None:
+    client = FakeWikiClient()
+    client.bodies[1] = diagram_body()
+    renderer = FakeDiagramRenderer()
+    output = tmp_path / "mirror"
+    exporter = WikiExporter(client=client, settings=settings(output), diagram_renderer=renderer)
+
+    first = exporter.sync_pages("ENG", (1,))
+
+    assert first.status == "ok"
+    page = output / "Engineering/Home-1.md"
+    assert page.read_text(encoding="utf-8") == (
+        "# Home\n\n"
+        "![draw.io diagram 1](Home/diagram-501-1.svg)\n\n"
+        "![draw.io diagram 2](Home/diagram-501-2.svg)\n"
+    )
+    assert (output / "Engineering/Home/diagram-501-1.svg").is_file()
+    assert (output / "Engineering/Home/diagram-501-2.svg").is_file()
+    assert not list(output.rglob("*.drawio"))
+    assert client.diagram_reads == [501]
+    assert len(renderer.calls) == 1
+
+    client.revision_reads.clear()
+    client.diagram_reads.clear()
+    second = exporter.sync_pages("ENG", (1,))
+
+    assert second.unchanged == 1
+    assert client.revision_reads == []
+    assert client.diagram_reads == []
+    assert len(renderer.calls) == 1
+
+
+def test_changed_page_reuses_unchanged_diagram_by_component_hash(tmp_path: Path) -> None:
+    client = FakeWikiClient()
+    client.bodies[1] = diagram_body()
+    renderer = FakeDiagramRenderer()
+    output = tmp_path / "mirror"
+    exporter = WikiExporter(client=client, settings=settings(output), diagram_renderer=renderer)
+    exporter.sync_pages("ENG", (1,))
+    client.revisions[1] = 11
+    client.bodies[1] = diagram_body(updated_at="2026-01-03T03:04:05Z")
+    client.diagram_reads.clear()
+
+    result = exporter.sync_pages("ENG", (1,))
+
+    assert result.updated == 1
+    assert client.diagram_reads == [501]
+    assert len(renderer.calls) == 1
+
+
+def test_failed_diagram_is_partial_and_retried_without_persisting_xml(tmp_path: Path) -> None:
+    client = FakeWikiClient()
+    client.bodies[1] = diagram_body()
+    renderer = FakeDiagramRenderer()
+    renderer.fail = True
+    output = tmp_path / "mirror"
+    exporter = WikiExporter(client=client, settings=settings(output), diagram_renderer=renderer)
+
+    first = exporter.sync_pages("ENG", (1,))
+
+    assert first.status == "partial"
+    assert first.errors == (
+        "page 1 diagram 501 skipped: local browser could not render the diagram",
+    )
+    assert "draw.io diagram 501 was not exported" in (
+        output / "Engineering/Home-1.md"
+    ).read_text(encoding="utf-8")
+    assert '<mxfile><diagram id="one"' not in "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in output.rglob("*")
+        if path.is_file()
+    )
+    manifest = json.loads((output / "gitee-wiki-lock.json").read_text(encoding="utf-8"))
+    assert manifest["spaces"]["ENG"]["pages"]["1"]["diagramsComplete"] is False
+
+    renderer.fail = False
+    client.diagram_reads.clear()
+    retry = exporter.sync_pages("ENG", (1,))
+
+    assert retry.status == "ok"
+    assert client.diagram_reads == [501]
+    assert (output / "Engineering/Home/diagram-501-1.svg").is_file()
+
+
+def test_changed_diagram_component_rerenders_and_removed_diagram_cleans_svg(
+    tmp_path: Path,
+) -> None:
+    client = FakeWikiClient()
+    client.bodies[1] = diagram_body()
+    renderer = FakeDiagramRenderer()
+    output = tmp_path / "mirror"
+    exporter = WikiExporter(client=client, settings=settings(output), diagram_renderer=renderer)
+    exporter.sync_pages("ENG", (1,))
+    client.revisions[1] = 11
+    client.diagram_components[501] = DiagramComponent(
+        501, '<mxfile><diagram id="changed"/></mxfile>'
+    )
+
+    changed = exporter.sync_pages("ENG", (1,))
+
+    assert changed.updated == 1
+    assert len(renderer.calls) == 2
+    client.revisions[1] = 12
+    client.bodies[1] = "Diagram removed"
+
+    removed = exporter.sync_pages("ENG", (1,))
+
+    assert removed.updated == 1
+    assert not list(output.rglob("*.svg"))
+
+
+def test_page_move_relocates_diagram_svgs_without_rerendering(tmp_path: Path) -> None:
+    client = FakeWikiClient()
+    client.bodies[1] = diagram_body()
+    renderer = FakeDiagramRenderer()
+    output = tmp_path / "mirror"
+    exporter = WikiExporter(client=client, settings=settings(output), diagram_renderer=renderer)
+    exporter.sync_pages("ENG", (1,))
+    client.direct_pages[1] = PageCandidate(
+        page_id=1,
+        title="Home",
+        parent_id=9,
+        ancestors=("Moved",),
+        ancestor_ids=(9,),
+    )
+    client.diagram_reads.clear()
+
+    moved = exporter.sync_pages("ENG", (1,))
+
+    assert moved.moved == 1
+    assert client.diagram_reads == []
+    assert len(renderer.calls) == 1
+    assert (output / "Engineering/Moved/Home/diagram-501-1.svg").is_file()
+    document = (output / "Engineering/Moved/Home-1.md").read_text(encoding="utf-8")
+    assert "Home/diagram-501-1.svg" in document
+    assert not (output / "Engineering/Home/diagram-501-1.svg").exists()
 
 
 def test_legacy_manifest_page_is_rerendered_without_revision_change(tmp_path: Path) -> None:
@@ -461,6 +685,30 @@ def test_page_with_descendants_selects_only_the_requested_subtree(tmp_path: Path
 
     assert [page.page_id for page in result.pages] == [1, 2]
     assert client.revision_reads == [1, 2]
+
+
+def test_known_page_id_can_export_when_root_tree_does_not_include_it(tmp_path: Path) -> None:
+    client = FakeWikiClient()
+    client.tree = ()
+    client.direct_pages[4] = PageCandidate(
+        page_id=4,
+        title="Nested",
+        parent_id=3,
+        ancestors=("Guides",),
+        ancestor_ids=(3,),
+    )
+    client.revisions[4] = 40
+    client.bodies[4] = "Direct page"
+    client.attachments[4] = ()
+
+    result = WikiExporter(client=client, settings=settings(tmp_path / "mirror")).sync_pages(
+        "ENG", (4,)
+    )
+
+    assert result.updated == 1
+    assert (tmp_path / "mirror/Engineering/Guides/Nested-4.md").read_text(
+        encoding="utf-8"
+    ) == "# Nested\n\nDirect page\n"
 
 
 def test_complete_space_sync_removes_only_manifest_managed_stale_files(tmp_path: Path) -> None:

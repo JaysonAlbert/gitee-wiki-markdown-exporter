@@ -161,7 +161,7 @@ def _execute(
             "Gitee Wiki export complete: "
             f"{result.updated} updated, {result.unchanged} unchanged, "
             f"{result.moved} moved, {result.deleted} deleted; "
-            f"{len(result.errors)} attachments skipped; "
+            f"{len(result.errors)} resources skipped; "
             f"output={result.output_path}"
         )
         for error in result.errors:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,6 +18,7 @@ _BLOCK_NODE_TYPES = {
     "bulletList",
     "codeBlock",
     "doc",
+    "diagram",
     "heading",
     "horizontalRule",
     "layout",
@@ -56,15 +57,28 @@ class MarkdownSerializer:
         self.marks = marks
         self.strict = strict
 
-    def serialize(self, document: RichTextNode) -> str:
-        return MarkdownSerializerState(self).render_blocks(_children(document))
+    def serialize(
+        self,
+        document: RichTextNode,
+        *,
+        diagram_links: Mapping[int, tuple[str, ...]] | None = None,
+    ) -> str:
+        return MarkdownSerializerState(self, diagram_links=diagram_links).render_blocks(
+            _children(document)
+        )
 
 
 class MarkdownSerializerState:
     """Per-document rendering state shared by registered node handlers."""
 
-    def __init__(self, serializer: MarkdownSerializer) -> None:
+    def __init__(
+        self,
+        serializer: MarkdownSerializer,
+        *,
+        diagram_links: Mapping[int, tuple[str, ...]] | None = None,
+    ) -> None:
         self.serializer = serializer
+        self.diagram_links = diagram_links or {}
         self.at_line_start = True
 
     def render_blocks(self, nodes: list[RichTextNode]) -> str:
@@ -152,7 +166,11 @@ class MarkdownSerializerState:
         return "\n".join(escaped)
 
 
-def render_wiki_content(content: str) -> str:
+def render_wiki_content(
+    content: str,
+    *,
+    diagram_links: Mapping[int, tuple[str, ...]] | None = None,
+) -> str:
     """Convert an observed Gitee rich-text document, preserving other text verbatim."""
     stripped = content.strip()
     if not stripped.startswith("{"):
@@ -166,7 +184,44 @@ def render_wiki_content(content: str) -> str:
     document = payload.get("default", payload)
     if not isinstance(document, dict) or document.get("type") != "doc":
         return content
-    return GITEE_MARKDOWN_SERIALIZER.serialize(document)
+    return GITEE_MARKDOWN_SERIALIZER.serialize(document, diagram_links=diagram_links)
+
+
+def find_diagram_references(content: str) -> tuple[tuple[int, str | None], ...]:
+    """Return unique draw.io component IDs and observed update timestamps in document order."""
+    document = _rich_text_document(content)
+    if document is None:
+        return ()
+    references: list[tuple[int, str | None]] = []
+    seen: set[int] = set()
+
+    def visit(node: RichTextNode) -> None:
+        if node.get("type") == "diagram":
+            attrs = _attrs(node)
+            component_id = _int_attr(attrs.get("diagram-page-id") or attrs.get("diagramPageId"))
+            if component_id is not None and component_id not in seen:
+                updated = attrs.get("diagram-update-at") or attrs.get("diagramUpdateAt")
+                references.append((component_id, str(updated) if updated is not None else None))
+                seen.add(component_id)
+        for child in _children(node):
+            visit(child)
+
+    visit(document)
+    return tuple(references)
+
+
+def _rich_text_document(content: str) -> RichTextNode | None:
+    stripped = content.strip()
+    if not stripped.startswith("{"):
+        return None
+    try:
+        payload = json.loads(stripped)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    document = payload.get("default", payload)
+    return document if isinstance(document, dict) and document.get("type") == "doc" else None
 
 
 def _render_container(state: MarkdownSerializerState, node: RichTextNode) -> str:
@@ -300,6 +355,20 @@ def _render_image(state: MarkdownSerializerState, node: RichTextNode) -> str:
     return f"![{alt}]({destination}{suffix})"
 
 
+def _render_diagram(state: MarkdownSerializerState, node: RichTextNode) -> str:
+    attrs = _attrs(node)
+    component_id = _int_attr(attrs.get("diagram-page-id") or attrs.get("diagramPageId"))
+    if component_id is None:
+        return "> [!WARNING]\n> draw.io diagram was not exported."
+    links = state.diagram_links.get(component_id, ())
+    if not links:
+        return f"> [!WARNING]\n> draw.io diagram {component_id} was not exported."
+    return "\n\n".join(
+        f"![draw.io diagram {page}]({_escape_link_destination(link)})"
+        for page, link in enumerate(links, start=1)
+    )
+
+
 def _render_mention(_state: MarkdownSerializerState, node: RichTextNode) -> str:
     attrs = _attrs(node)
     label = attrs.get("text") or attrs.get("label") or attrs.get("name") or attrs.get("id")
@@ -395,6 +464,13 @@ def _attrs(node: RichTextNode) -> dict[str, Any]:
     return attrs if isinstance(attrs, dict) else {}
 
 
+def _int_attr(value: object) -> int | None:
+    try:
+        return int(value) if value is not None and not isinstance(value, bool) else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _longest_run(value: str, character: str) -> int:
     longest = current = 0
     for candidate in value:
@@ -410,6 +486,7 @@ GITEE_NODE_SERIALIZERS: dict[str, NodeRenderer] = {
     "blockquote": _render_blockquote,
     "bulletList": _render_bullet_list,
     "codeBlock": _render_code_block,
+    "diagram": _render_diagram,
     "doc": _render_container,
     "hardBreak": _render_hard_break,
     "heading": _render_heading,

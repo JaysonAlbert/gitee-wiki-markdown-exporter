@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from urllib.parse import quote, urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
 
-from gitee_wiki_markdown_exporter.models import Attachment, PageRevision, Space, TreeNode
+from gitee_wiki_markdown_exporter.models import (
+    Attachment,
+    DiagramComponent,
+    PageCandidate,
+    PageRevision,
+    Space,
+    TreeNode,
+)
 
 
 class GiteeWikiError(RuntimeError):
@@ -60,11 +67,56 @@ class GiteeWikiClient:
 
     def get_tree(self, space_id: int) -> tuple[TreeNode, ...]:
         """Read the complete nested page tree for one space."""
-        data = self._data("GET", f"/api/wiki/spaces/{space_id}/tree", label="tree")
+        values = self._tree_values(space_id)
+        return tuple(
+            _parse_tree_node(
+                value,
+                child_loader=lambda parent_id: self._tree_values(space_id, parent_id),
+            )
+            for value in values
+        )
+
+    def _tree_values(self, space_id: int, parent_id: int | None = None) -> list[object]:
+        data = self._data(
+            "GET",
+            f"/api/wiki/spaces/{space_id}/tree",
+            label="tree",
+            params={"parent": parent_id} if parent_id is not None else None,
+        )
         values = data.get("tree")
         if not isinstance(values, list):
             raise GiteeWikiError("Wiki tree.data.tree is not a list")
-        return tuple(_parse_tree_node(value) for value in values)
+        return values
+
+    def get_page(self, space_id: int, page_id: int) -> PageCandidate:
+        """Resolve page metadata and breadcrumbs for an explicitly requested page ID."""
+        data = self._data(
+            "GET", f"/api/wiki/spaces/{space_id}/pages/{page_id}", label="page"
+        )
+        resolved_id = _int(data.get("id") or data.get("pageId")) or page_id
+        title = _text(data.get("title") or data.get("name")) or str(resolved_id)
+        path_values = data.get("pagePathList", [])
+        ancestors: list[str] = []
+        ancestor_ids: list[int] = []
+        if isinstance(path_values, list):
+            for value in path_values:
+                if not isinstance(value, Mapping):
+                    continue
+                path_id = _int(value.get("id") or value.get("pageId"))
+                path_title = _text(value.get("title") or value.get("name"))
+                if path_id in {space_id, resolved_id}:
+                    continue
+                if path_id is not None and path_title is not None:
+                    ancestor_ids.append(path_id)
+                    ancestors.append(path_title)
+        parent = data.get("parent") or data.get("parentId")
+        return PageCandidate(
+            page_id=resolved_id,
+            title=title,
+            parent_id=parent if isinstance(parent, (int, str)) else None,
+            ancestors=tuple(ancestors),
+            ancestor_ids=tuple(ancestor_ids),
+        )
 
     def latest_revision(self, space_id: int, page_id: int) -> int:
         """Return the latest text revision ID for a page."""
@@ -93,6 +145,25 @@ class GiteeWikiClient:
             id=_int(data.get("id")) or revision_id,
             title=_text(data.get("title")) or str(page_id),
             content_type=_text(data.get("contentType")) or "text",
+            content=content,
+        )
+
+    def get_diagram_component(
+        self, space_key: str, component_page_id: int
+    ) -> DiagramComponent:
+        """Read the draw.io XML stored by one diagram component."""
+        data = self._data(
+            "GET",
+            f"/api/wiki/spaces/{quote(space_key, safe='')}/pages/{component_page_id}/component",
+            label="diagram component",
+        )
+        content = data.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise GiteeWikiError(
+                f"Wiki diagram component {component_page_id} does not contain text"
+            )
+        return DiagramComponent(
+            id=_int(data.get("id") or data.get("pageId")) or component_page_id,
             content=content,
         )
 
@@ -214,19 +285,38 @@ class GiteeWikiClient:
         return GiteeWikiError(f"{method} {safe_url} failed:{suffix}")
 
 
-def _parse_tree_node(value: object) -> TreeNode:
+def _parse_tree_node(
+    value: object,
+    *,
+    child_loader: Callable[[int], list[object]] | None = None,
+    lineage: frozenset[int] = frozenset(),
+) -> TreeNode:
     if not isinstance(value, Mapping):
         raise GiteeWikiError("Wiki tree contains a non-object node")
     page_id = _required_int(value.get("pageId") or value.get("id"), "tree.pageId")
-    children = value.get("children", [])
-    if not isinstance(children, list):
+    if page_id in lineage:
+        raise GiteeWikiError("Wiki tree contains a parent cycle")
+    raw_children = value.get("children")
+    if raw_children is None:
+        raw_children = value.get("items")
+    if raw_children is not None and not isinstance(raw_children, list):
         raise GiteeWikiError("Wiki tree node children is not a list")
-    parent = value.get("parentId")
+    children = raw_children if isinstance(raw_children, list) else []
+    if value.get("isLeaf") is False and not children and child_loader is not None:
+        children = child_loader(page_id)
+    parent = value.get("parentId") if value.get("parentId") is not None else value.get("parent")
     return TreeNode(
         page_id=page_id,
         title=_text(value.get("title") or value.get("name")) or str(page_id),
         parent_id=parent if isinstance(parent, (int, str)) else None,
-        children=tuple(_parse_tree_node(child) for child in children),
+        children=tuple(
+            _parse_tree_node(
+                child,
+                child_loader=child_loader,
+                lineage=lineage | {page_id},
+            )
+            for child in children
+        ),
     )
 
 

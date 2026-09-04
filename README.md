@@ -29,11 +29,14 @@ as part of its public v5 OpenAPI. Revision bodies containing the observed ProseM
 document are converted to Markdown; already-Markdown bodies pass through unchanged. Test against
 a non-production space before relying on it. The converter uses an explicit Gitee node/mark
 registry inspired by the official ProseMirror Markdown serializer, so Gitee-specific schema names
-remain isolated from Markdown escaping and rendering state.
+remain isolated from Markdown escaping and rendering state. Embedded draw.io diagrams are rendered
+locally to SVG and referenced from Markdown; the mirror does not retain editable `.drawio` files.
 
 ## Installation
 
-Python 3.10 or newer is required.
+Python 3.10 or newer is required. Pages containing draw.io diagrams also require a local Chrome,
+Chromium, or Edge installation. Set `GWME_CHROME_PATH` when the browser executable is not in a
+standard location.
 
 ```bash
 python3 -m venv .venv
@@ -72,6 +75,7 @@ Create `app_data.json` and point `GWME_CONFIG_PATH` at it:
     "output_path": "./wiki-export",
     "page_path": "{space_name}/{ancestor_titles}/{page_title}-{page_id}.md",
     "attachment_path": "{page_parent_path}/{page_title}/{attachment_file_id}{attachment_extension}",
+    "diagram_path": "{page_parent_path}/{page_title}/diagram-{diagram_id}-{diagram_page}.svg",
     "include_document_title": true,
     "include_yaml_frontmatter": false,
     "skip_unchanged": true,
@@ -130,8 +134,8 @@ Example cron entry:
 
 The exporter keeps `gitee-wiki-lock.json` in the output root. For every page it records the Gitee
 page ID, current revision, Markdown renderer version, local path, tree parent, and downloaded
-attachments. A renderer upgrade refreshes the affected page once even when its Gitee revision has
-not changed.
+attachments and diagrams. A renderer upgrade refreshes the affected page once even when its Gitee
+revision has not changed.
 
 - unchanged revision, title, path, and attachment metadata: skip the page body and attachment
   bytes;
@@ -139,6 +143,10 @@ not changed.
   attachment files;
 - failed attachment download: continue exporting the page, report the run as `partial`, preserve a
   query-free link to the remote attachment, and retry the attachment on the next synchronization;
+- draw.io diagram: fetch its component XML, render every diagram page locally as SVG, reference the
+  SVG files from Markdown, and reuse unchanged SVGs by content hash;
+- failed diagram fetch or render: continue exporting the page with a visible placeholder, report
+  the run as `partial`, and retry the diagram on the next synchronization;
 - renamed or moved page: update its generated title/path and reuse unchanged attachments;
 - deleted page during a complete-space sync: remove its managed local files when
   `cleanup_stale` is enabled;
@@ -162,8 +170,11 @@ The following observed endpoints are used:
 ```text
 GET  /api/wiki/spaces/key/{spaceKey}
 GET  /api/wiki/spaces/{spaceId}/tree
+GET  /api/wiki/spaces/{spaceId}/tree?parent={pageId}
+GET  /api/wiki/spaces/{spaceId}/pages/{pageId}
 GET  /api/wiki/spaces/{spaceId}/pages/{pageId}/history
 GET  /api/wiki/spaces/{spaceId}/pages/{pageId}/history/{revisionId}
+GET  /api/wiki/spaces/{spaceKey}/pages/{componentPageId}/component
 POST /api/wiki/attachments/list
 GET  /wiki-static/...
 ```

@@ -47,6 +47,14 @@ class Attachment:
 
 
 @dataclass(frozen=True)
+class DiagramComponent:
+    """A draw.io component referenced by a Wiki rich-text page."""
+
+    id: int
+    content: str
+
+
+@dataclass(frozen=True)
 class PageCandidate:
     """A selected tree page with path context."""
 

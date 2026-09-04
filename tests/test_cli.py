@@ -91,5 +91,5 @@ def test_partial_export_reports_skipped_attachment_warning(tmp_path: Path, monke
     )
 
     assert result.exit_code == 0
-    assert "1 attachments skipped" in result.stdout
+    assert "1 resources skipped" in result.stdout
     assert "warning: page 2 attachment 99 skipped: HTTP 500" in result.stderr

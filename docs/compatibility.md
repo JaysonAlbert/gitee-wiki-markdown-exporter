@@ -8,13 +8,16 @@ This exporter targets the gateway contract observed on a self-hosted Gitee insta
 | Capability | Method and path | Required response |
 | --- | --- | --- |
 | Resolve space | `GET /api/wiki/spaces/key/{key}` | `data.id`, `data.key` |
-| Read tree | `GET /api/wiki/spaces/{id}/tree` | `data.tree[]` with page IDs |
+| Read tree | `GET /api/wiki/spaces/{id}/tree[?parent={page}]` | `data.tree[]` with page IDs and `isLeaf`; non-leaf nodes are expanded recursively |
+| Resolve page | `GET /api/wiki/spaces/{id}/pages/{page}` | page title, parent, and optional `pagePathList[]` breadcrumbs |
 | Latest revision | `GET /api/wiki/spaces/{id}/pages/{page}/history` | first `data.items[]` or `data.list[]` ID |
 | Revision body | `GET /api/wiki/spaces/{id}/pages/{page}/history/{revision}` | string `data.content` containing Markdown/plain text or the observed JSON document |
+| Diagram component | `GET /api/wiki/spaces/{key}/pages/{componentPage}/component` | string `data.content` containing draw.io/mxGraph XML |
 | Attachments | `POST /api/wiki/attachments/list` | `data.list[]` |
 | Attachment bytes | URL under `/wiki-static/` | bounded binary response |
 
-History pagination uses one-based `offset=1`, matching the observed gateway behavior.
+History pagination uses one-based `offset=1`, matching the observed gateway behavior. The root
+tree response may contain only top-level nodes; child lookup uses the `parent` query parameter.
 
 Some installations label a revision as `text` while `data.content` is a JSON object whose
 `default` property contains a ProseMirror-style `doc`. The exporter recognizes that exact envelope
@@ -24,6 +27,12 @@ escaped, adjacent text fragments with the same marks are serialized as one marke
 fences expand when their content contains backticks. Unknown container nodes retain recognized
 descendants. Invalid or unrecognized top-level JSON remains plain text rather than being guessed
 at. Binary YDoc state is not supported.
+
+An observed `diagram` node stores a component page ID rather than a stable SVG URL. The exporter
+fetches that component's draw.io XML and uses a local headless Chrome-compatible browser with the
+Gitee-hosted preview application to produce portable SVG files. It writes the SVG files referenced
+by Markdown and deliberately does not retain `.drawio` source files. Diagram rendering is invoked
+only for pages that contain diagram nodes; failures are recoverable and retried by incremental sync.
 
 The exporter accepts envelopes where `data` contains the resource. An explicit non-zero `code` or
 `success: false` is an error. HTTP errors are reported with method, sanitized URL, and status only.

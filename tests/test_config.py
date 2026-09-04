@@ -31,7 +31,9 @@ def test_load_settings_resolves_relative_output_and_environment_token(
     assert settings.auth.url == "https://gitee.example.com"
     assert settings.auth.resolve_token() == "secret-value"
     assert settings.export.output_path == (tmp_path / "mirror").resolve()
+    assert settings.export.diagram_path.endswith("diagram-{diagram_id}-{diagram_page}.svg")
     assert settings.sync.spaces == ("ENG",)
     rendered = safe_settings_dict(settings)
     assert "secret-value" not in json.dumps(rendered)
     assert rendered["auth"]["gitee"]["token_available"] is True
+    assert rendered["export"]["diagram_path"] == settings.export.diagram_path

@@ -54,6 +54,9 @@ class ExportSettings:
     attachment_path: str = (
         "{page_parent_path}/{page_title}/{attachment_file_id}{attachment_extension}"
     )
+    diagram_path: str = (
+        "{page_parent_path}/{page_title}/diagram-{diagram_id}-{diagram_page}.svg"
+    )
     include_document_title: bool = True
     include_yaml_frontmatter: bool = False
     skip_unchanged: bool = True
@@ -140,6 +143,10 @@ def load_settings(path: Path | None = None) -> Settings:
                 export_data.get("attachment_path")
                 or "{page_parent_path}/{page_title}/{attachment_file_id}{attachment_extension}"
             ),
+            diagram_path=str(
+                export_data.get("diagram_path")
+                or "{page_parent_path}/{page_title}/diagram-{diagram_id}-{diagram_page}.svg"
+            ),
             include_document_title=_boolean(
                 export_data.get("include_document_title", True),
                 "export.include_document_title",
@@ -192,6 +199,7 @@ def safe_settings_dict(settings: Settings) -> dict[str, object]:
             "output_path": str(settings.export.output_path),
             "page_path": settings.export.page_path,
             "attachment_path": settings.export.attachment_path,
+            "diagram_path": settings.export.diagram_path,
             "include_document_title": settings.export.include_document_title,
             "include_yaml_frontmatter": settings.export.include_yaml_frontmatter,
             "skip_unchanged": settings.export.skip_unchanged,

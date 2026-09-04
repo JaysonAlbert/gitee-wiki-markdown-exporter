@@ -30,6 +30,22 @@ def test_client_uses_observed_paths_headers_and_envelopes() -> None:
                     },
                 },
             )
+        if path.endswith("/spaces/34/pages/2"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "id": 2,
+                        "title": "Child",
+                        "parent": 1,
+                        "pagePathList": [
+                            {"id": 34, "title": "Documents", "contentType": "text"},
+                            {"id": 1, "title": "Root", "contentType": "text"},
+                            {"id": 2, "title": "Child", "contentType": "text"},
+                        ],
+                    }
+                },
+            )
         if path.endswith("/pages/2/history"):
             assert dict(request.url.params) == {
                 "limit": "1",
@@ -48,6 +64,11 @@ def test_client_uses_observed_paths_headers_and_envelopes() -> None:
                         "content": "Body",
                     }
                 },
+            )
+        if path.endswith("/spaces/ENG/pages/501/component"):
+            return httpx.Response(
+                200,
+                json={"data": {"id": 501, "content": '<mxfile><diagram id="a"/></mxfile>'}},
             )
         if path.endswith("/attachments/list"):
             assert json.loads(request.content)["rawId"] == 2
@@ -74,13 +95,20 @@ def test_client_uses_observed_paths_headers_and_envelopes() -> None:
 
     space = client.get_space("ENG")
     tree = client.get_tree(space.id)
+    wiki_page = client.get_page(space.id, 2)
     revision = client.latest_revision(space.id, 2)
     page = client.get_revision(space.id, 2, revision)
+    diagram = client.get_diagram_component(space.key, 501)
     attachments = client.list_attachments(2)
     content, content_type = client.download_attachment(attachments[0].url, max_bytes=10)
 
     assert tree[0].children[0].page_id == 2
+    assert wiki_page.page_id == 2
+    assert wiki_page.ancestors == ("Root",)
+    assert wiki_page.ancestor_ids == (1,)
     assert page.content == "Body"
+    assert diagram.id == 501
+    assert diagram.content == '<mxfile><diagram id="a"/></mxfile>'
     assert content == b"png"
     assert content_type == "image/png"
     assert all(request.headers["authorization"] == "Bearer top-secret" for request in requests)
@@ -104,6 +132,39 @@ def test_client_rejects_cross_host_attachments_without_leaking_token() -> None:
         assert "top-secret" not in str(error)
     else:
         raise AssertionError("cross-host attachment was accepted")
+
+
+def test_client_expands_lazy_non_leaf_tree_nodes() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/spaces/34/tree") and request.url.params.get("parent") == "1":
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "tree": [
+                            {"id": 2, "title": "Child", "parent": 1, "isLeaf": True}
+                        ]
+                    }
+                },
+            )
+        if request.url.path.endswith("/spaces/34/tree"):
+            return httpx.Response(
+                200,
+                json={"data": {"tree": [{"id": 1, "title": "Root", "isLeaf": False}]}},
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    client = GiteeWikiClient(
+        base_url="https://gitee.example.com",
+        tenant_id="demo",
+        token="top-secret",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    tree = client.get_tree(34)
+
+    assert tree[0].children[0].page_id == 2
+    assert tree[0].children[0].parent_id == 1
 
 
 def test_client_bounds_attachment_before_returning_content() -> None:
