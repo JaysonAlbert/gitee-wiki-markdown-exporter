@@ -44,6 +44,7 @@ class Attachment:
     url: str
     size: int | None = None
     content_type: str | None = None
+    updated_at: str | None = None
 
 
 @dataclass(frozen=True)

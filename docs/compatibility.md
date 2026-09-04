@@ -13,7 +13,7 @@ This exporter targets the gateway contract observed on a self-hosted Gitee insta
 | Latest revision | `GET /api/wiki/spaces/{id}/pages/{page}/history` | first `data.items[]` or `data.list[]` ID |
 | Revision body | `GET /api/wiki/spaces/{id}/pages/{page}/history/{revision}` | string `data.content` containing Markdown/plain text or the observed JSON document |
 | Diagram component | `GET /api/wiki/spaces/{key}/pages/{componentPage}/component` | string `data.content` containing draw.io/mxGraph XML |
-| Attachments | `POST /api/wiki/attachments/list` | `data.list[]` |
+| Attachments | `POST /api/wiki/attachments/list` | `data.list[]`, including `uploadAt` when available |
 | Attachment bytes | URL under `/wiki-static/` | bounded binary response |
 
 History pagination uses one-based `offset=1`, matching the observed gateway behavior. The root

@@ -39,15 +39,17 @@ CLI
    for complete spaces or descendant selections, read the page tree and expand non-leaf nodes
    through the endpoint's `parent` query until the selected hierarchy is complete.
 2. Flatten selected roots into page records with stable page IDs and ancestor titles.
-3. Read the latest revision ID and attachment metadata for each selected page.
+3. Read the latest revision ID and attachment metadata for each selected page. Poll component XML
+   hashes for diagrams already recorded in the manifest, because a component may change without a
+   new host-page revision.
 4. Compare `(page ID, revision, renderer version, title, rendered path, attachment metadata,
    diagram state)` with the previous manifest.
 5. Build a staging output beside the current output, initially populated from the previous mirror.
 6. Download changed page bodies and attachment bytes into staging, reuse unchanged attachments,
    and move unchanged pages whose tree path changed. Fetch draw.io component XML and render every
    diagram page locally as SVG; only SVG output is persisted. If an attachment or diagram fails,
-   keep exporting the page, record a partial-run error, and leave the item incomplete so the next
-   synchronization retries it.
+   keep exporting the page, preserve the last successful diagram SVG when available, record a
+   partial-run error, and leave the item incomplete so the next synchronization retries it.
 7. For complete-space selections, remove stale managed files when cleanup is enabled.
 8. Write the next manifest and replace the output directory. Attachment and diagram failures are
    recoverable pre-swap errors; any other pre-swap failure discards staging and preserves the

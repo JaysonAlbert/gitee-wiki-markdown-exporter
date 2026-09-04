@@ -10,6 +10,7 @@ import posixpath
 import re
 import shutil
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -63,9 +64,7 @@ class WikiReader(Protocol):
 
     def download_attachment(self, url: str, *, max_bytes: int) -> tuple[bytes, str | None]: ...
 
-    def get_diagram_component(
-        self, space_key: str, component_page_id: int
-    ) -> DiagramComponent: ...
+    def get_diagram_component(self, space_key: str, component_page_id: int) -> DiagramComponent: ...
 
 
 class ExportError(RuntimeError):
@@ -81,6 +80,12 @@ class Selection:
     descendants: bool = False
     complete_space: bool = False
     cleanup_stale: bool = False
+
+
+@dataclass(frozen=True)
+class _PageRemoteState:
+    revision: int
+    attachments: tuple[Attachment, ...]
 
 
 class WikiExporter:
@@ -184,9 +189,7 @@ class WikiExporter:
             tree = self.client.get_tree(space.id)
             all_candidates = _flatten_tree(tree)
             candidates = _select_candidates(all_candidates, selection)
-            missing = set(selection.page_ids) - {
-                candidate.page_id for candidate in candidates
-            }
+            missing = set(selection.page_ids) - {candidate.page_id for candidate in candidates}
         if missing:
             values = ", ".join(str(value) for value in sorted(missing))
             raise ExportError(f"pages not found in space {space.key}: {values}")
@@ -210,13 +213,25 @@ class WikiExporter:
         outcomes: list[PageOutcome] = []
         errors: list[str] = []
         selected_ids: set[str] = set()
-        for candidate in candidates:
+        if len(candidates) >= 20:
+            with ThreadPoolExecutor(max_workers=12, thread_name_prefix="gwme-page-state") as pool:
+                remote_states = tuple(
+                    pool.map(
+                        lambda candidate: self._read_page_state(space.id, candidate.page_id),
+                        candidates,
+                    )
+                )
+        else:
+            remote_states = tuple(
+                self._read_page_state(space.id, candidate.page_id) for candidate in candidates
+            )
+        for candidate, remote_state in zip(candidates, remote_states, strict=True):
             page_key = str(candidate.page_id)
             selected_ids.add(page_key)
             old_entry = previous_pages.get(page_key, {})
             if not isinstance(old_entry, dict):
                 old_entry = {}
-            revision = self.client.latest_revision(space.id, candidate.page_id)
+            revision = remote_state.revision
             desired_path = render_page_path(
                 self.settings.page_path,
                 space_name=space.name,
@@ -229,6 +244,7 @@ class WikiExporter:
                 space=space,
                 candidate=candidate,
                 revision=revision,
+                attachments=remote_state.attachments,
                 desired_path=desired_path,
                 old_entry=old_entry,
             )
@@ -254,6 +270,12 @@ class WikiExporter:
         next_spaces[space.key] = next_space
         return outcomes, deleted, errors
 
+    def _read_page_state(self, space_id: int, page_id: int) -> _PageRemoteState:
+        return _PageRemoteState(
+            revision=self.client.latest_revision(space_id, page_id),
+            attachments=self.client.list_attachments(page_id),
+        )
+
     def _sync_page(
         self,
         *,
@@ -261,6 +283,7 @@ class WikiExporter:
         space: Space,
         candidate: PageCandidate,
         revision: int,
+        attachments: tuple[Attachment, ...],
         desired_path: Path,
         old_entry: dict[str, Any],
     ) -> tuple[str, dict[str, Any], list[str]]:
@@ -268,13 +291,12 @@ class WikiExporter:
         old_attachments = old_entry.get("attachments", [])
         old_diagrams = old_entry.get("diagrams", [])
         old_revision = str(old_entry.get("revision", ""))
-        attachments = self.client.list_attachments(candidate.page_id)
         attachments_unchanged = _attachments_match(
             staging=staging,
             old_attachments=old_attachments,
             current_attachments=attachments,
         )
-        unchanged = (
+        base_unchanged = (
             self.settings.skip_unchanged
             and old_revision == str(revision)
             and old_entry.get("rendererVersion") == _MARKDOWN_RENDERER_VERSION
@@ -285,6 +307,23 @@ class WikiExporter:
             and old_entry.get("diagramsComplete", True) is True
             and _diagrams_exist(staging, old_diagrams)
         )
+        old_diagrams_by_id = _diagram_entries_by_id(old_diagrams)
+        diagram_components: dict[int, DiagramComponent] = {}
+        diagram_probe_errors: dict[int, GiteeWikiError] = {}
+        diagrams_unchanged = True
+        if base_unchanged:
+            for component_id, old_diagram in old_diagrams_by_id.items():
+                try:
+                    component = self.client.get_diagram_component(space.key, component_id)
+                except GiteeWikiError as error:
+                    diagram_probe_errors[component_id] = error
+                    diagrams_unchanged = False
+                    continue
+                diagram_components[component_id] = component
+                digest = hashlib.sha256(component.content.encode("utf-8")).hexdigest()
+                if old_diagram.get("sha256") != digest:
+                    diagrams_unchanged = False
+        unchanged = base_unchanged and diagrams_unchanged
         if unchanged and old_path == desired_path:
             entry = copy.deepcopy(old_entry)
             entry.update(_page_metadata(candidate, revision, desired_path))
@@ -366,10 +405,13 @@ class WikiExporter:
 
         diagram_links: dict[int, tuple[str, ...]] = {}
         diagrams_complete = True
-        old_diagrams_by_id = _diagram_entries_by_id(old_diagrams)
         for component_id, updated_at in find_diagram_references(page.content):
             try:
-                component = self.client.get_diagram_component(space.key, component_id)
+                if component_id in diagram_probe_errors:
+                    raise diagram_probe_errors[component_id]
+                component = diagram_components.get(component_id)
+                if component is None:
+                    component = self.client.get_diagram_component(space.key, component_id)
                 digest = hashlib.sha256(component.content.encode("utf-8")).hexdigest()
                 old_diagram = old_diagrams_by_id.get(component_id)
                 old_paths = _diagram_paths(old_diagram)
@@ -417,6 +459,31 @@ class WikiExporter:
             except (GiteeWikiError, DiagramRenderError) as error:
                 diagrams_complete = False
                 errors.append(f"page {candidate.page_id} diagram {component_id} skipped: {error}")
+                old_diagram = old_diagrams_by_id.get(component_id)
+                old_paths = _diagram_paths(old_diagram)
+                if (
+                    old_diagram is not None
+                    and old_paths
+                    and all((staging / path).is_file() for path in old_paths)
+                ):
+                    paths = tuple(
+                        render_diagram_path(
+                            self.settings.diagram_path,
+                            page_path=desired_path,
+                            page_title=candidate.title,
+                            diagram_id=component_id,
+                            diagram_page=index,
+                        )
+                        for index in range(1, len(old_paths) + 1)
+                    )
+                    for old_diagram_path, diagram_path in zip(old_paths, paths, strict=True):
+                        _copy_managed_file(staging, old_diagram_path, diagram_path)
+                    diagram_links[component_id] = tuple(
+                        _relative_link(desired_path.parent, path) for path in paths
+                    )
+                    preserved = copy.deepcopy(old_diagram)
+                    preserved["paths"] = [path.as_posix() for path in paths]
+                    diagram_entries.append(preserved)
 
         body = _rewrite_links(
             render_wiki_content(page.content, diagram_links=diagram_links), replacements
@@ -440,9 +507,7 @@ class WikiExporter:
                 }:
                     _remove_path(staging, old_attachment_path)
         current_diagram_paths = {
-            path
-            for entry in diagram_entries
-            for path in _diagram_paths(entry)
+            path for entry in diagram_entries for path in _diagram_paths(entry)
         }
         for old_diagram in old_diagrams if isinstance(old_diagrams, list) else []:
             if isinstance(old_diagram, dict):
@@ -516,9 +581,7 @@ class WikiExporter:
                     )
                     for index in range(1, len(old_paths) + 1)
                 )
-                for old_diagram_path, new_diagram_path in zip(
-                    old_paths, new_paths, strict=True
-                ):
+                for old_diagram_path, new_diagram_path in zip(old_paths, new_paths, strict=True):
                     replacements[_relative_link(old_path.parent, old_diagram_path)] = (
                         _relative_link(desired_path.parent, new_diagram_path)
                     )
@@ -747,6 +810,7 @@ def _attachment_metadata(attachment: Attachment, attachment_path: Path) -> dict[
         "urlPath": _attachment_url_path(attachment.url),
         "remoteSize": attachment.size,
         "remoteContentType": attachment.content_type,
+        "remoteUpdatedAt": attachment.updated_at,
     }
 
 
@@ -761,6 +825,7 @@ def _attachment_metadata_matches(entry: dict[str, Any], attachment: Attachment) 
         and entry.get("urlPath") == _attachment_url_path(attachment.url)
         and entry.get("remoteSize") == attachment.size
         and entry.get("remoteContentType") == attachment.content_type
+        and entry.get("remoteUpdatedAt") == attachment.updated_at
     )
 
 

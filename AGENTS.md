@@ -35,6 +35,7 @@ history.
   boundaries, and transport-error sanitization.
 - `exporter.py`: page selection, incremental decisions, attachment localization, managed cleanup,
   staging, and output replacement.
+- `diagram.py`: local browser discovery, draw.io rendering, network isolation, and SVG sanitizing.
 - `rich_text.py`: observed Gitee rich-text JSON to Markdown rendering with plain-text passthrough.
 - `paths.py`: filename normalization and cross-platform relative-path safety.
 - `manifest.py`: versioned lockfile loading and atomic writing.
@@ -92,11 +93,14 @@ details into the exporter.
   the desired local path.
 - Poll attachment metadata on every selected-page sync, even when the page revision is unchanged.
   Reuse attachment bytes only when the recorded metadata and managed file still match.
+- Poll recorded draw.io component content hashes even when the host-page revision is unchanged.
+  Preserve the last successful SVG after a transient component fetch or render failure.
 - A title or tree-path change must update generated Markdown metadata and local attachment links.
 - A complete-space sync may reconcile deleted pages; a selected-page sync must not infer that
   unselected pages were deleted.
 - Preserve the documented limitation: a byte-only attachment replacement is not detectable when
-  Gitee changes none of ID, name, normalized URL path, advertised size, or content type.
+  Gitee changes none of ID, name, normalized URL path, advertised size, content type, or upload
+  timestamp.
 
 ### Compatibility
 

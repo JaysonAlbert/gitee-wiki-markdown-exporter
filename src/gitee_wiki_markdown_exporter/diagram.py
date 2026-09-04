@@ -87,9 +87,9 @@ class ChromeDiagramRenderer:
                 )
                 cdp = _DevTools(connection, allowed_origin=_origin(self.preview_url))
                 target = cdp.call("Target.createTarget", {"url": "about:blank"})["targetId"]
-                session = cdp.call(
-                    "Target.attachToTarget", {"targetId": target, "flatten": True}
-                )["sessionId"]
+                session = cdp.call("Target.attachToTarget", {"targetId": target, "flatten": True})[
+                    "sessionId"
+                ]
                 for method in ("Page.enable", "Runtime.enable", "Network.enable"):
                     cdp.call(method, session_id=session)
                 cdp.call("Page.navigate", {"url": self.preview_url}, session_id=session)

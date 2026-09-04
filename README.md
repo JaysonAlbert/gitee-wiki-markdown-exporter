@@ -143,18 +143,18 @@ revision has not changed.
   attachment files;
 - failed attachment download: continue exporting the page, report the run as `partial`, preserve a
   query-free link to the remote attachment, and retry the attachment on the next synchronization;
-- draw.io diagram: fetch its component XML, render every diagram page locally as SVG, reference the
-  SVG files from Markdown, and reuse unchanged SVGs by content hash;
-- failed diagram fetch or render: continue exporting the page with a visible placeholder, report
-  the run as `partial`, and retry the diagram on the next synchronization;
+- draw.io diagram: poll the component XML hash, render every changed diagram page locally as SVG,
+  reference the SVG files from Markdown, and reuse unchanged SVGs;
+- failed diagram fetch or render: preserve the last successful SVG when available, otherwise emit
+  a visible placeholder, report the run as `partial`, and retry on the next synchronization;
 - renamed or moved page: update its generated title/path and reuse unchanged attachments;
 - deleted page during a complete-space sync: remove its managed local files when
   `cleanup_stale` is enabled;
 - failure before the directory swap: keep the previous output directory and lockfile intact.
 
 Attachment replacement detection uses the metadata returned by Gitee (ID, name, URL, advertised
-size, and content type). If a Gitee version replaces bytes without changing any of those fields,
-the change cannot be detected without forcing a full download.
+size, content type, and upload timestamp). If a Gitee version replaces bytes without changing any
+of those fields, the change cannot be detected without forcing a full download.
 
 Only files recorded in the lockfile are eligible for cleanup.
 

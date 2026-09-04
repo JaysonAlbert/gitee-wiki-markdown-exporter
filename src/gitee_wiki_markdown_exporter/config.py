@@ -54,9 +54,7 @@ class ExportSettings:
     attachment_path: str = (
         "{page_parent_path}/{page_title}/{attachment_file_id}{attachment_extension}"
     )
-    diagram_path: str = (
-        "{page_parent_path}/{page_title}/diagram-{diagram_id}-{diagram_page}.svg"
-    )
+    diagram_path: str = "{page_parent_path}/{page_title}/diagram-{diagram_id}-{diagram_page}.svg"
     include_document_title: bool = True
     include_yaml_frontmatter: bool = False
     skip_unchanged: bool = True

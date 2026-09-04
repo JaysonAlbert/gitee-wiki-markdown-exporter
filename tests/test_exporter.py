@@ -48,6 +48,7 @@ class FakeWikiClient:
             501: DiagramComponent(501, '<mxfile><diagram id="one"/></mxfile>')
         }
         self.diagram_reads: list[int] = []
+        self.fail_diagram_ids: set[int] = set()
         self.direct_pages: dict[int, object] = {}
 
     def get_space(self, space_key: str) -> Space:
@@ -114,6 +115,8 @@ class FakeWikiClient:
 
     def get_diagram_component(self, _space_key: str, component_page_id: int) -> DiagramComponent:
         self.diagram_reads.append(component_page_id)
+        if component_page_id in self.fail_diagram_ids:
+            raise GiteeWikiError("GET https://gitee.example.com/component failed: HTTP 503")
         return self.diagram_components[component_page_id]
 
 
@@ -327,7 +330,7 @@ def test_drawio_diagram_is_mirrored_only_as_svg_and_reused_incrementally(
 
     assert second.unchanged == 1
     assert client.revision_reads == []
-    assert client.diagram_reads == []
+    assert client.diagram_reads == [501]
     assert len(renderer.calls) == 1
 
 
@@ -349,6 +352,27 @@ def test_changed_page_reuses_unchanged_diagram_by_component_hash(tmp_path: Path)
     assert len(renderer.calls) == 1
 
 
+def test_diagram_component_change_is_detected_without_a_page_revision_change(
+    tmp_path: Path,
+) -> None:
+    client = FakeWikiClient()
+    client.bodies[1] = diagram_body()
+    renderer = FakeDiagramRenderer()
+    output = tmp_path / "mirror"
+    exporter = WikiExporter(client=client, settings=settings(output), diagram_renderer=renderer)
+    exporter.sync_pages("ENG", (1,))
+    client.diagram_components[501] = DiagramComponent(
+        501, '<mxfile><diagram id="independent-change"/></mxfile>'
+    )
+    client.diagram_reads.clear()
+
+    result = exporter.sync_pages("ENG", (1,))
+
+    assert result.updated == 1
+    assert client.diagram_reads == [501]
+    assert len(renderer.calls) == 2
+
+
 def test_failed_diagram_is_partial_and_retried_without_persisting_xml(tmp_path: Path) -> None:
     client = FakeWikiClient()
     client.bodies[1] = diagram_body()
@@ -363,13 +387,11 @@ def test_failed_diagram_is_partial_and_retried_without_persisting_xml(tmp_path: 
     assert first.errors == (
         "page 1 diagram 501 skipped: local browser could not render the diagram",
     )
-    assert "draw.io diagram 501 was not exported" in (
-        output / "Engineering/Home-1.md"
-    ).read_text(encoding="utf-8")
+    assert "draw.io diagram 501 was not exported" in (output / "Engineering/Home-1.md").read_text(
+        encoding="utf-8"
+    )
     assert '<mxfile><diagram id="one"' not in "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in output.rglob("*")
-        if path.is_file()
+        path.read_text(encoding="utf-8") for path in output.rglob("*") if path.is_file()
     )
     manifest = json.loads((output / "gitee-wiki-lock.json").read_text(encoding="utf-8"))
     assert manifest["spaces"]["ENG"]["pages"]["1"]["diagramsComplete"] is False
@@ -381,6 +403,38 @@ def test_failed_diagram_is_partial_and_retried_without_persisting_xml(tmp_path: 
     assert retry.status == "ok"
     assert client.diagram_reads == [501]
     assert (output / "Engineering/Home/diagram-501-1.svg").is_file()
+
+
+def test_transient_diagram_failure_preserves_last_successful_svg_and_retries(
+    tmp_path: Path,
+) -> None:
+    client = FakeWikiClient()
+    client.bodies[1] = diagram_body()
+    renderer = FakeDiagramRenderer()
+    output = tmp_path / "mirror"
+    exporter = WikiExporter(client=client, settings=settings(output), diagram_renderer=renderer)
+    exporter.sync_pages("ENG", (1,))
+    original_document = (output / "Engineering/Home-1.md").read_text(encoding="utf-8")
+    original_svg = (output / "Engineering/Home/diagram-501-1.svg").read_text(encoding="utf-8")
+    client.fail_diagram_ids.add(501)
+
+    failed = exporter.sync_pages("ENG", (1,))
+
+    assert failed.status == "partial"
+    assert (output / "Engineering/Home-1.md").read_text(encoding="utf-8") == original_document
+    assert (output / "Engineering/Home/diagram-501-1.svg").read_text(
+        encoding="utf-8"
+    ) == original_svg
+    manifest = json.loads((output / "gitee-wiki-lock.json").read_text(encoding="utf-8"))
+    assert manifest["spaces"]["ENG"]["pages"]["1"]["diagramsComplete"] is False
+
+    client.fail_diagram_ids.clear()
+    client.diagram_reads.clear()
+    retry = exporter.sync_pages("ENG", (1,))
+
+    assert retry.status == "ok"
+    assert client.diagram_reads == [501]
+    assert len(renderer.calls) == 1
 
 
 def test_changed_diagram_component_rerenders_and_removed_diagram_cleans_svg(
@@ -429,7 +483,7 @@ def test_page_move_relocates_diagram_svgs_without_rerendering(tmp_path: Path) ->
     moved = exporter.sync_pages("ENG", (1,))
 
     assert moved.moved == 1
-    assert client.diagram_reads == []
+    assert client.diagram_reads == [501]
     assert len(renderer.calls) == 1
     assert (output / "Engineering/Moved/Home/diagram-501-1.svg").is_file()
     document = (output / "Engineering/Moved/Home-1.md").read_text(encoding="utf-8")
@@ -598,6 +652,39 @@ def test_attachment_changes_sync_without_a_page_revision_change(tmp_path: Path) 
     assert client.download_reads == ["demo/2/new.png"]
     assert not (output / "Engineering/Home/Runbook/99.png").exists()
     assert (output / "Engineering/Home/Runbook/100.png").read_bytes() == b"png"
+
+
+def test_attachment_upload_timestamp_triggers_download_when_other_metadata_is_stable(
+    tmp_path: Path,
+) -> None:
+    client = FakeWikiClient()
+    client.attachments[2] = (
+        Attachment(
+            99,
+            "diagram.png",
+            "demo/2/diagram.png",
+            size=3,
+            updated_at="2026-01-02T03:04:05Z",
+        ),
+    )
+    output = tmp_path / "mirror"
+    exporter = WikiExporter(client=client, settings=settings(output))
+    exporter.sync_spaces(("ENG",))
+    client.download_reads.clear()
+    client.attachments[2] = (
+        Attachment(
+            99,
+            "diagram.png",
+            "demo/2/diagram.png",
+            size=3,
+            updated_at="2026-01-03T03:04:05Z",
+        ),
+    )
+
+    result = exporter.sync_spaces(("ENG",))
+
+    assert result.updated == 1
+    assert client.download_reads == ["demo/2/diagram.png"]
 
 
 def test_changed_attachment_redownloads_only_that_attachment(tmp_path: Path) -> None:

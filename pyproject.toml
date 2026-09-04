@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gitee-wiki-markdown-exporter"
-version = "0.2.0"
+version = "0.3.0"
 description = "Export Gitee Project Wiki spaces and pages to an incremental local Markdown mirror."
 readme = "README.md"
 requires-python = ">=3.10"

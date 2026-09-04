@@ -77,7 +77,14 @@ def test_client_uses_observed_paths_headers_and_envelopes() -> None:
                 json={
                     "data": {
                         "total": 1,
-                        "list": [{"id": 9, "name": "image.png", "url": "demo/2/image.png"}],
+                        "list": [
+                            {
+                                "id": 9,
+                                "name": "image.png",
+                                "url": "demo/2/image.png",
+                                "uploadAt": "2026-01-02T03:04:05Z",
+                            }
+                        ],
                     }
                 },
             )
@@ -111,6 +118,7 @@ def test_client_uses_observed_paths_headers_and_envelopes() -> None:
     assert diagram.content == '<mxfile><diagram id="a"/></mxfile>'
     assert content == b"png"
     assert content_type == "image/png"
+    assert attachments[0].updated_at == "2026-01-02T03:04:05Z"
     assert all(request.headers["authorization"] == "Bearer top-secret" for request in requests)
     assert all(request.headers["x-wiki-tenant-id"] == "demo" for request in requests)
 
@@ -139,13 +147,7 @@ def test_client_expands_lazy_non_leaf_tree_nodes() -> None:
         if request.url.path.endswith("/spaces/34/tree") and request.url.params.get("parent") == "1":
             return httpx.Response(
                 200,
-                json={
-                    "data": {
-                        "tree": [
-                            {"id": 2, "title": "Child", "parent": 1, "isLeaf": True}
-                        ]
-                    }
-                },
+                json={"data": {"tree": [{"id": 2, "title": "Child", "parent": 1, "isLeaf": True}]}},
             )
         if request.url.path.endswith("/spaces/34/tree"):
             return httpx.Response(

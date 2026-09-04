@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote, urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
@@ -68,10 +69,40 @@ class GiteeWikiClient:
     def get_tree(self, space_id: int) -> tuple[TreeNode, ...]:
         """Read the complete nested page tree for one space."""
         values = self._tree_values(space_id)
+        children_by_parent: dict[int, list[object]] = {}
+        pending: set[int] = set()
+        expanded: set[int] = set()
+
+        def discover(nodes: list[object]) -> None:
+            for value in nodes:
+                if not isinstance(value, Mapping):
+                    raise GiteeWikiError("Wiki tree contains a non-object node")
+                page_id = _required_int(value.get("pageId") or value.get("id"), "tree.pageId")
+                raw_children = _tree_children(value)
+                if raw_children:
+                    children_by_parent[page_id] = raw_children
+                    discover(raw_children)
+                elif value.get("isLeaf") is False and page_id not in expanded:
+                    pending.add(page_id)
+
+        discover(values)
+        with ThreadPoolExecutor(max_workers=12, thread_name_prefix="gwme-tree") as pool:
+            while pending:
+                parent_ids = tuple(sorted(pending - expanded))
+                pending.clear()
+                if not parent_ids:
+                    break
+                batches = pool.map(
+                    lambda parent_id: self._tree_values(space_id, parent_id), parent_ids
+                )
+                for parent_id, children in zip(parent_ids, batches, strict=True):
+                    expanded.add(parent_id)
+                    children_by_parent[parent_id] = children
+                    discover(children)
         return tuple(
             _parse_tree_node(
                 value,
-                child_loader=lambda parent_id: self._tree_values(space_id, parent_id),
+                child_loader=lambda parent_id: children_by_parent.get(parent_id, []),
             )
             for value in values
         )
@@ -90,9 +121,7 @@ class GiteeWikiClient:
 
     def get_page(self, space_id: int, page_id: int) -> PageCandidate:
         """Resolve page metadata and breadcrumbs for an explicitly requested page ID."""
-        data = self._data(
-            "GET", f"/api/wiki/spaces/{space_id}/pages/{page_id}", label="page"
-        )
+        data = self._data("GET", f"/api/wiki/spaces/{space_id}/pages/{page_id}", label="page")
         resolved_id = _int(data.get("id") or data.get("pageId")) or page_id
         title = _text(data.get("title") or data.get("name")) or str(resolved_id)
         path_values = data.get("pagePathList", [])
@@ -148,9 +177,7 @@ class GiteeWikiClient:
             content=content,
         )
 
-    def get_diagram_component(
-        self, space_key: str, component_page_id: int
-    ) -> DiagramComponent:
+    def get_diagram_component(self, space_key: str, component_page_id: int) -> DiagramComponent:
         """Read the draw.io XML stored by one diagram component."""
         data = self._data(
             "GET",
@@ -203,6 +230,7 @@ class GiteeWikiClient:
                         url=_required_text(value.get("url"), "attachment.url"),
                         size=_int(value.get("size")),
                         content_type=_text(value.get("type") or value.get("contentType")),
+                        updated_at=_text(value.get("uploadAt") or value.get("updatedAt")),
                     )
                 )
             total = _int(data.get("total")) or len(attachments)
@@ -296,12 +324,7 @@ def _parse_tree_node(
     page_id = _required_int(value.get("pageId") or value.get("id"), "tree.pageId")
     if page_id in lineage:
         raise GiteeWikiError("Wiki tree contains a parent cycle")
-    raw_children = value.get("children")
-    if raw_children is None:
-        raw_children = value.get("items")
-    if raw_children is not None and not isinstance(raw_children, list):
-        raise GiteeWikiError("Wiki tree node children is not a list")
-    children = raw_children if isinstance(raw_children, list) else []
+    children = _tree_children(value)
     if value.get("isLeaf") is False and not children and child_loader is not None:
         children = child_loader(page_id)
     parent = value.get("parentId") if value.get("parentId") is not None else value.get("parent")
@@ -318,6 +341,15 @@ def _parse_tree_node(
             for child in children
         ),
     )
+
+
+def _tree_children(value: Mapping[str, object]) -> list[object]:
+    raw_children = value.get("children")
+    if raw_children is None:
+        raw_children = value.get("items")
+    if raw_children is not None and not isinstance(raw_children, list):
+        raise GiteeWikiError("Wiki tree node children is not a list")
+    return raw_children if isinstance(raw_children, list) else []
 
 
 def _required_int(value: object, label: str) -> int:
