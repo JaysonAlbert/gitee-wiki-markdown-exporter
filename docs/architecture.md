@@ -44,20 +44,23 @@ CLI
    diagrams already recorded in the manifest, because a component may change without a new
    host-page revision.
 4. Compare `(page ID, revision, renderer version, title, rendered path, attachment metadata,
-   diagram state)` with the previous manifest.
+   embedded-resource state, diagram state)` with the previous manifest.
 5. Build a staging output beside the current output, initially populated from the previous mirror.
    A first complete-space synchronization uses a stable, private checkpoint staging directory;
    other runs continue to use disposable random staging.
 6. Download changed page bodies and attachment bytes into staging, reuse unchanged attachments,
-   and move unchanged pages whose tree path changed. Fetch draw.io component XML and render every
-   diagram page locally as SVG; only SVG output is persisted. If an attachment or diagram fails,
-   keep exporting the page, preserve the last successful diagram SVG when available, record a
-   partial-run error, and leave the item incomplete so the next synchronization retries it.
+   discover remaining `/wiki-static/` Markdown destinations that are absent from attachment
+   metadata, and localize those same-origin embedded resources through the same bounded transport.
+   Move unchanged pages whose tree path changed. Fetch draw.io component XML and render every
+   diagram page locally as SVG; only SVG output is persisted. If an attachment, embedded resource,
+   or diagram fails, keep exporting the page, preserve a query-free remote resource link or the
+   last successful diagram SVG, record a partial-run error, and leave the item incomplete so the
+   next synchronization retries it.
 7. For complete-space selections, remove stale managed files when cleanup is enabled.
-8. Write the next manifest and replace the output directory. Attachment and diagram failures are
-   recoverable pre-swap errors; any other pre-swap failure preserves a valid first-sync checkpoint
-   or discards disposable staging, while the previous mirror remains unchanged. Backup deletion
-   after a committed swap is best-effort.
+8. Write the next manifest and replace the output directory. Attachment, embedded-resource, and
+   diagram failures are recoverable pre-swap errors; any other pre-swap failure preserves a valid
+   first-sync checkpoint or discards disposable staging, while the previous mirror remains
+   unchanged. Backup deletion after a committed swap is best-effort.
 
 The manifest is an optimization and cleanup authority, not a remote source of truth. Gitee page
 IDs and revisions remain authoritative.
@@ -74,11 +77,11 @@ interruption without operator-only flags and the published command surface remai
 The checkpoint staging directory, fingerprint sidecar, and per-page state directory live beside the
 configured output. They are private implementation artifacts and are never copied into the
 committed mirror. A small page-state record is written atomically after each completed page and
-after each successfully materialized attachment or draw.io component; the cumulative manifest is
-not rewritten for every page. File data is committed before a state record refers to it, so a crash
-may leave an unreferenced file but cannot make incomplete bytes reusable. Partial page entries
-deliberately do not claim that the Markdown page is complete; they only authorize reuse of
-validated attachment and diagram files on the next attempt.
+after each successfully materialized attachment, embedded resource, or draw.io component; the
+cumulative manifest is not rewritten for every page. File data is committed before a state record
+refers to it, so a crash may leave an unreferenced file but cannot make incomplete bytes reusable.
+Partial page entries deliberately do not claim that the Markdown page is complete; they only
+authorize reuse of validated attachment, embedded-resource, and diagram files on the next attempt.
 
 A SHA-256 fingerprint binds a checkpoint to:
 
@@ -126,6 +129,8 @@ content back to Gitee remain outside the read-only exporter boundary.
 - Never include authorization headers or raw tokens in logs, manifests, JSON output, or exceptions.
 - Reject tree-derived paths that escape the configured output root.
 - Bound attachment sizes before buffering them in memory.
+- Apply the same origin, redirect, size, and path constraints to embedded `/wiki-static/`
+  resources that are not listed as attachments.
 - Reject off-origin attachment URLs and do not follow HTTP redirects.
 
 ## Non-goals

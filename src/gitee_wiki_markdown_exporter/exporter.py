@@ -49,11 +49,12 @@ from gitee_wiki_markdown_exporter.models import (
 from gitee_wiki_markdown_exporter.paths import (
     render_attachment_path,
     render_diagram_path,
+    render_embedded_resource_path,
     render_page_path,
 )
 from gitee_wiki_markdown_exporter.rich_text import find_diagram_references, render_wiki_content
 
-_MARKDOWN_RENDERER_VERSION = 4
+_MARKDOWN_RENDERER_VERSION = 5
 _CHECKPOINT_SCHEMA_VERSION = 1
 _CHECKPOINT_PARTIAL = "_checkpointPartial"
 _OUTPUT_LOCK_GUARD = threading.Lock()
@@ -326,6 +327,9 @@ def _checkpoint_files_exist(staging: Path, manifest: dict[str, Any]) -> bool:
             diagrams = entry.get("diagrams")
             if not isinstance(diagrams, list) or not _diagrams_exist(staging, diagrams):
                 return False
+            embedded = entry.get("embeddedResources")
+            if not isinstance(embedded, list) or not _embedded_resources_exist(staging, embedded):
+                return False
     return True
 
 
@@ -407,11 +411,14 @@ def _checkpoint_page_entry(
     desired_path: Path,
     attachments: list[dict[str, object]],
     diagrams: list[dict[str, object]],
+    embedded_resources: list[dict[str, object]],
 ) -> dict[str, Any]:
     entry = _page_metadata(candidate, revision, desired_path)
     entry["attachments"] = copy.deepcopy(attachments)
     entry["diagrams"] = copy.deepcopy(diagrams)
     entry["diagramsComplete"] = False
+    entry["embeddedResources"] = copy.deepcopy(embedded_resources)
+    entry["embeddedResourcesComplete"] = False
     entry[_CHECKPOINT_PARTIAL] = True
     return entry
 
@@ -690,6 +697,7 @@ class WikiExporter:
         old_path = _manifest_path(old_entry.get("path"))
         old_attachments = old_entry.get("attachments", [])
         old_diagrams = old_entry.get("diagrams", [])
+        old_embedded_resources = old_entry.get("embeddedResources", [])
         old_revision = str(old_entry.get("revision", ""))
         attachments_unchanged = _attachments_match(
             staging=staging,
@@ -707,6 +715,8 @@ class WikiExporter:
             and attachments_unchanged
             and old_entry.get("diagramsComplete", True) is True
             and _diagrams_exist(staging, old_diagrams)
+            and old_entry.get("embeddedResourcesComplete") is True
+            and _embedded_resources_exist(staging, old_embedded_resources)
         )
         old_diagrams_by_id = _diagram_entries_by_id(old_diagrams)
         diagram_components: dict[int, DiagramComponent] = {}
@@ -738,14 +748,20 @@ class WikiExporter:
                 desired_path=desired_path,
                 old_attachments=old_attachments,
                 old_diagrams=old_diagrams,
+                old_embedded_resources=old_embedded_resources,
             )
             return "moved", entry, []
 
         page = self.client.get_revision(space.id, candidate.page_id, revision)
         attachment_entries: list[dict[str, object]] = []
         diagram_entries: list[dict[str, object]] = []
+        embedded_resource_entries: list[dict[str, object]] = []
         errors: list[str] = []
         replacements: dict[str, str] = {}
+        attachment_links: dict[int, tuple[str, str]] = {}
+        listed_attachment_url_paths = {
+            _attachment_url_path(attachment.url) for attachment in attachments
+        }
         old_by_id = _attachment_entries_by_id(old_attachments)
         for attachment in attachments:
             attachment_path = render_attachment_path(
@@ -789,6 +805,7 @@ class WikiExporter:
                     errors.append(
                         f"page {candidate.page_id} attachment {attachment.id} skipped: {error}"
                     )
+                    attachment_links[attachment.id] = (attachment.name, remote_link)
                     continue
                 _atomic_write_bytes(staging / attachment_path, content)
                 attachment_entry = _attachment_metadata(attachment, attachment_path)
@@ -800,6 +817,7 @@ class WikiExporter:
                     }
                 )
             relative_link = _relative_link(desired_path.parent, attachment_path)
+            attachment_links[attachment.id] = (attachment.name, relative_link)
             for source in sources:
                 replacements[source] = relative_link
             attachment_entries.append(attachment_entry)
@@ -811,6 +829,7 @@ class WikiExporter:
                         desired_path=desired_path,
                         attachments=attachment_entries,
                         diagrams=diagram_entries,
+                        embedded_resources=embedded_resource_entries,
                     )
                 )
 
@@ -875,6 +894,7 @@ class WikiExporter:
                             desired_path=desired_path,
                             attachments=attachment_entries,
                             diagrams=diagram_entries,
+                            embedded_resources=embedded_resource_entries,
                         )
                     )
             except (GiteeWikiError, DiagramRenderError) as error:
@@ -913,12 +933,78 @@ class WikiExporter:
                                 desired_path=desired_path,
                                 attachments=attachment_entries,
                                 diagrams=diagram_entries,
+                                embedded_resources=embedded_resource_entries,
                             )
                         )
 
         body = _rewrite_links(
-            render_wiki_content(page.content, diagram_links=diagram_links), replacements
+            render_wiki_content(
+                page.content,
+                diagram_links=diagram_links,
+                attachment_links=attachment_links,
+            ),
+            replacements,
         )
+        body = _absolutize_confluence_redirects(body, self.client.base_url)
+        old_embedded_by_url_path = _embedded_entries_by_url_path(old_embedded_resources)
+        embedded_resources_complete = True
+        embedded_replacements: dict[str, str] = {}
+        for url_path, sources in _wiki_static_destinations(body, self.client.base_url):
+            if url_path in listed_attachment_url_paths:
+                continue
+            embedded_path = render_embedded_resource_path(
+                page_path=desired_path,
+                url_path=url_path,
+            )
+            old_resource = old_embedded_by_url_path.get(url_path)
+            old_resource_path = (
+                _manifest_path(old_resource.get("path")) if old_resource is not None else None
+            )
+            if (
+                old_resource is not None
+                and old_resource_path is not None
+                and (staging / old_resource_path).is_file()
+            ):
+                _copy_managed_file(staging, old_resource_path, embedded_path)
+                resource_entry = copy.deepcopy(old_resource)
+                resource_entry["path"] = embedded_path.as_posix()
+            else:
+                try:
+                    content, content_type = self.client.download_attachment(
+                        sources[0],
+                        max_bytes=self.settings.max_attachment_bytes,
+                    )
+                except GiteeWikiError as error:
+                    embedded_resources_complete = False
+                    for source in sources:
+                        embedded_replacements[source] = self.client.base_url.rstrip("/") + url_path
+                    errors.append(
+                        f"page {candidate.page_id} embedded resource {url_path} skipped: {error}"
+                    )
+                    continue
+                _atomic_write_bytes(staging / embedded_path, content)
+                resource_entry = {
+                    "urlPath": url_path,
+                    "path": embedded_path.as_posix(),
+                    "size": len(content),
+                    "contentType": content_type,
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+            embedded_resource_entries.append(resource_entry)
+            for source in sources:
+                embedded_replacements[source] = _relative_link(desired_path.parent, embedded_path)
+            if save_progress is not None:
+                save_progress(
+                    _checkpoint_page_entry(
+                        candidate=candidate,
+                        revision=revision,
+                        desired_path=desired_path,
+                        attachments=attachment_entries,
+                        diagrams=diagram_entries,
+                        embedded_resources=embedded_resource_entries,
+                    )
+                )
+        body = _rewrite_markdown_destinations(body, embedded_replacements)
         document = _render_document(
             body,
             title=candidate.title,
@@ -945,11 +1031,21 @@ class WikiExporter:
                 for old_diagram_path in _diagram_paths(old_diagram):
                     if old_diagram_path not in current_diagram_paths:
                         _remove_path(staging, old_diagram_path)
+        current_embedded_paths = {Path(str(entry["path"])) for entry in embedded_resource_entries}
+        for old_resource in (
+            old_embedded_resources if isinstance(old_embedded_resources, list) else []
+        ):
+            if isinstance(old_resource, dict):
+                old_resource_path = _manifest_path(old_resource.get("path"))
+                if old_resource_path and old_resource_path not in current_embedded_paths:
+                    _remove_path(staging, old_resource_path)
         _atomic_write_text(staging / desired_path, document)
         entry = _page_metadata(candidate, revision, desired_path)
         entry["attachments"] = attachment_entries
         entry["diagrams"] = diagram_entries
         entry["diagramsComplete"] = diagrams_complete
+        entry["embeddedResources"] = embedded_resource_entries
+        entry["embeddedResourcesComplete"] = embedded_resources_complete
         moved = (
             old_revision == str(revision)
             and old_path is not None
@@ -968,10 +1064,12 @@ class WikiExporter:
         desired_path: Path,
         old_attachments: object,
         old_diagrams: object,
+        old_embedded_resources: object,
     ) -> dict[str, Any]:
         old_document = (staging / old_path).read_text(encoding="utf-8")
         attachment_entries: list[dict[str, object]] = []
         diagram_entries: list[dict[str, object]] = []
+        embedded_resource_entries: list[dict[str, object]] = []
         replacements: dict[str, str] = {}
         if isinstance(old_attachments, list):
             for item in old_attachments:
@@ -1020,6 +1118,25 @@ class WikiExporter:
                 copied = copy.deepcopy(item)
                 copied["paths"] = [path.as_posix() for path in new_paths]
                 diagram_entries.append(copied)
+        if isinstance(old_embedded_resources, list):
+            for item in old_embedded_resources:
+                if not isinstance(item, dict):
+                    continue
+                old_resource_path = _manifest_path(item.get("path"))
+                url_path = item.get("urlPath")
+                if old_resource_path is None or not isinstance(url_path, str):
+                    continue
+                new_resource_path = render_embedded_resource_path(
+                    page_path=desired_path,
+                    url_path=url_path,
+                )
+                replacements[_relative_link(old_path.parent, old_resource_path)] = _relative_link(
+                    desired_path.parent, new_resource_path
+                )
+                _move_file(staging, old_resource_path, new_resource_path)
+                copied = copy.deepcopy(item)
+                copied["path"] = new_resource_path.as_posix()
+                embedded_resource_entries.append(copied)
         _move_file(
             staging,
             old_path,
@@ -1030,6 +1147,8 @@ class WikiExporter:
         entry["attachments"] = attachment_entries
         entry["diagrams"] = diagram_entries
         entry["diagramsComplete"] = True
+        entry["embeddedResources"] = embedded_resource_entries
+        entry["embeddedResourcesComplete"] = True
         return entry
 
 
@@ -1157,6 +1276,135 @@ def _rewrite_links(content: str, replacements: dict[str, str]) -> str:
     return content
 
 
+def _absolutize_confluence_redirects(content: str, base_url: str) -> str:
+    replacements: dict[str, str] = {}
+    for _start, _end, destination in _markdown_destination_spans(content):
+        parsed = urlparse(destination)
+        if (
+            not parsed.scheme
+            and not parsed.netloc
+            and parsed.path == "/api/wiki/confluence/redirect"
+        ):
+            replacements[destination] = base_url.rstrip("/") + destination
+    return _rewrite_markdown_destinations(content, replacements)
+
+
+def _wiki_static_destinations(
+    content: str, base_url: str
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    grouped: dict[str, list[str]] = {}
+    base_origin = _url_origin(base_url)
+    for _start, _end, destination in _markdown_destination_spans(content):
+        parsed = urlparse(destination)
+        if not parsed.path.startswith("/wiki-static/"):
+            continue
+        if (parsed.scheme or parsed.netloc) and _url_origin(destination) != base_origin:
+            continue
+        sources = grouped.setdefault(parsed.path, [])
+        if destination not in sources:
+            sources.append(destination)
+    return tuple((url_path, tuple(sources)) for url_path, sources in grouped.items())
+
+
+def _url_origin(url: str) -> tuple[str, str]:
+    parsed = urlparse(url)
+    return parsed.scheme.lower(), parsed.netloc.lower()
+
+
+def _rewrite_markdown_destinations(content: str, replacements: dict[str, str]) -> str:
+    if not replacements:
+        return content
+    spans = _markdown_destination_spans(content)
+    pieces: list[str] = []
+    position = 0
+    for start, end, destination in spans:
+        replacement = replacements.get(destination)
+        if replacement is None:
+            continue
+        pieces.append(content[position:start])
+        pieces.append(replacement)
+        position = end
+    if position == 0:
+        return content
+    pieces.append(content[position:])
+    return "".join(pieces)
+
+
+def _markdown_destination_spans(content: str) -> tuple[tuple[int, int, str], ...]:
+    spans: list[tuple[int, int, str]] = []
+    offset = 0
+    fence_character: str | None = None
+    fence_length = 0
+    for line in content.splitlines(keepends=True):
+        fence = re.match(r" {0,3}(`{3,}|~{3,})", line)
+        if fence is not None:
+            marker = fence.group(1)
+            if fence_character is None:
+                fence_character = marker[0]
+                fence_length = len(marker)
+            elif marker[0] == fence_character and len(marker) >= fence_length:
+                fence_character = None
+                fence_length = 0
+            offset += len(line)
+            continue
+        if fence_character is None:
+            spans.extend(_markdown_line_destination_spans(line, offset))
+        offset += len(line)
+    return tuple(spans)
+
+
+def _markdown_line_destination_spans(line: str, offset: int) -> list[tuple[int, int, str]]:
+    spans: list[tuple[int, int, str]] = []
+    index = 0
+    while index < len(line):
+        if line[index] == "`":
+            run = 1
+            while index + run < len(line) and line[index + run] == "`":
+                run += 1
+            closing = line.find("`" * run, index + run)
+            index = len(line) if closing < 0 else closing + run
+            continue
+        if not line.startswith("](", index):
+            index += 1
+            continue
+        cursor = index + 2
+        while cursor < len(line) and line[cursor] in " \t":
+            cursor += 1
+        if cursor >= len(line):
+            break
+        if line[cursor] == "<":
+            start = cursor + 1
+            end = start
+            while end < len(line) and line[end] != ">":
+                end += 2 if line[end] == "\\" and end + 1 < len(line) else 1
+            if end < len(line) and end > start:
+                spans.append((offset + start, offset + end, line[start:end]))
+                index = end + 1
+                continue
+            index = cursor + 1
+            continue
+        start = cursor
+        depth = 0
+        while cursor < len(line):
+            character = line[cursor]
+            if character == "\\" and cursor + 1 < len(line):
+                cursor += 2
+                continue
+            if character == "(":
+                depth += 1
+            elif character == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif character in " \t\r\n" and depth == 0:
+                break
+            cursor += 1
+        if cursor > start:
+            spans.append((offset + start, offset + cursor, line[start:cursor]))
+        index = max(cursor, index + 1)
+    return spans
+
+
 def _relative_link(page_parent: Path, attachment_path: Path) -> str:
     start = page_parent.as_posix() if page_parent.as_posix() != "." else "."
     return posixpath.relpath(attachment_path.as_posix(), start=start)
@@ -1180,6 +1428,28 @@ def _attachments_exist(staging: Path, value: object) -> bool:
         and (staging / path).is_file()
         for item in value
     )
+
+
+def _embedded_resources_exist(staging: Path, value: object) -> bool:
+    if not isinstance(value, list):
+        return False
+    return all(
+        isinstance(item, dict)
+        and isinstance(item.get("urlPath"), str)
+        and (path := _manifest_path(item.get("path"))) is not None
+        and (staging / path).is_file()
+        for item in value
+    )
+
+
+def _embedded_entries_by_url_path(value: object) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, list):
+        return {}
+    return {
+        str(item["urlPath"]): item
+        for item in value
+        if isinstance(item, dict) and isinstance(item.get("urlPath"), str)
+    }
 
 
 def _attachment_entries_by_id(value: object) -> dict[int, dict[str, Any]]:
@@ -1294,6 +1564,13 @@ def _remove_managed_entry(staging: Path, entry: dict[str, Any]) -> None:
         for diagram in diagrams:
             for diagram_path in _diagram_paths(diagram):
                 _remove_path(staging, diagram_path)
+    embedded_resources = entry.get("embeddedResources", [])
+    if isinstance(embedded_resources, list):
+        for resource in embedded_resources:
+            if isinstance(resource, dict):
+                resource_path = _manifest_path(resource.get("path"))
+                if resource_path:
+                    _remove_path(staging, resource_path)
 
 
 def _remove_path(root: Path, relative: Path) -> None:

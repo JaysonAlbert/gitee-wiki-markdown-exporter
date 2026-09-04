@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 - Resume interrupted first complete-space exports from validated page, attachment, and draw.io
   checkpoints without exposing an incomplete mirror as the live output.
+- Preserve observed task lists, status labels, information blocks, attachment macros, directories,
+  and table-span column positions when rendering ProseMirror documents.
+- Localize same-origin `/wiki-static/` resources omitted by attachment metadata, including
+  checkpoint reuse, page moves, cleanup, and retryable partial failures.
+- Make legacy Gitee Confluence redirect links portable outside the Wiki application.
 
 ## 0.3.0 - 2026-09-04
 

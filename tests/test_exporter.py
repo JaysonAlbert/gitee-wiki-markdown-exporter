@@ -598,6 +598,146 @@ def test_failed_attachment_is_reported_and_page_export_continues(tmp_path: Path)
     )
 
 
+def test_unlisted_wiki_static_resource_is_localized_and_reused(tmp_path: Path) -> None:
+    client = FakeWikiClient()
+    client.attachments[2] = ()
+    client.bodies[2] = (
+        "![inline](/wiki-static/demo/2/inline.png?temporary=secret)\n\n"
+        "```markdown\n"
+        "![example](/wiki-static/examples/not-a-resource.png)\n"
+        "```"
+    )
+    output = tmp_path / "mirror"
+    exporter = WikiExporter(client=client, settings=settings(output))
+
+    first = exporter.sync_pages("ENG", (2,))
+
+    assert first.status == "ok"
+    manifest_text = (output / "gitee-wiki-lock.json").read_text(encoding="utf-8")
+    assert "temporary=secret" not in manifest_text
+    entry = json.loads(manifest_text)["spaces"]["ENG"]["pages"]["2"]
+    assert entry["embeddedResourcesComplete"] is True
+    assert len(entry["embeddedResources"]) == 1
+    resource = entry["embeddedResources"][0]
+    assert resource["urlPath"] == "/wiki-static/demo/2/inline.png"
+    resource_path = Path(resource["path"])
+    assert (output / resource_path).read_bytes() == b"ret"
+    document = (output / "Engineering/Home/Runbook-2.md").read_text(encoding="utf-8")
+    assert f"![inline](Runbook-2/{resource_path.name})" in document
+    assert "![example](/wiki-static/examples/not-a-resource.png)" in document
+
+    client.download_reads.clear()
+    second = exporter.sync_pages("ENG", (2,))
+
+    assert second.unchanged == 1
+    assert client.download_reads == []
+
+
+def test_failed_unlisted_wiki_static_resource_stays_remote_and_is_retried(
+    tmp_path: Path,
+) -> None:
+    client = FakeWikiClient()
+    client.attachments[2] = ()
+    source = "/wiki-static/demo/2/missing.png?temporary=secret"
+    client.bodies[2] = f"![inline]({source})"
+    client.fail_attachment_urls.add(source)
+    output = tmp_path / "mirror"
+    exporter = WikiExporter(client=client, settings=settings(output))
+
+    first = exporter.sync_pages("ENG", (2,))
+
+    assert first.status == "partial"
+    assert "embedded resource /wiki-static/demo/2/missing.png skipped" in first.errors[0]
+    assert (output / "Engineering/Home/Runbook-2.md").read_text(encoding="utf-8") == (
+        "# Runbook\n\n![inline](https://gitee.example.com/wiki-static/demo/2/missing.png)\n"
+    )
+    entry = json.loads((output / "gitee-wiki-lock.json").read_text(encoding="utf-8"))["spaces"][
+        "ENG"
+    ]["pages"]["2"]
+    assert entry["embeddedResourcesComplete"] is False
+
+    client.fail_attachment_urls.clear()
+    client.download_reads.clear()
+    second = exporter.sync_pages("ENG", (2,))
+
+    assert second.status == "ok"
+    assert client.download_reads == [source]
+
+
+def test_only_gitee_confluence_redirect_destinations_are_made_absolute(tmp_path: Path) -> None:
+    client = FakeWikiClient()
+    client.attachments[2] = ()
+    client.bodies[2] = (
+        "[legacy](/api/wiki/confluence/redirect?pageId=123)\n\n"
+        "[example](/api/example/resource)\n\n"
+        "`[code](/api/wiki/confluence/redirect?pageId=456)`"
+    )
+    output = tmp_path / "mirror"
+
+    WikiExporter(client=client, settings=settings(output)).sync_pages("ENG", (2,))
+
+    assert (output / "Engineering/Home/Runbook-2.md").read_text(encoding="utf-8") == (
+        "# Runbook\n\n"
+        "[legacy](https://gitee.example.com/api/wiki/confluence/redirect?pageId=123)\n\n"
+        "[example](/api/example/resource)\n\n"
+        "`[code](/api/wiki/confluence/redirect?pageId=456)`\n"
+    )
+
+
+def test_page_move_relocates_embedded_resources_without_downloading(tmp_path: Path) -> None:
+    client = FakeWikiClient()
+    client.attachments[2] = ()
+    client.bodies[2] = "![inline](/wiki-static/demo/2/inline.png)"
+    output = tmp_path / "mirror"
+    exporter = WikiExporter(client=client, settings=settings(output))
+    exporter.sync_pages("ENG", (2,))
+    client.direct_pages[2] = PageCandidate(
+        page_id=2,
+        title="Runbook",
+        parent_id=9,
+        ancestors=("Moved",),
+        ancestor_ids=(9,),
+    )
+    client.download_reads.clear()
+
+    moved = exporter.sync_pages("ENG", (2,))
+
+    assert moved.moved == 1
+    assert client.download_reads == []
+    page = output / "Engineering/Moved/Runbook-2.md"
+    assert "Runbook-2/embedded-" in page.read_text(encoding="utf-8")
+    assert list((output / "Engineering/Moved/Runbook-2").glob("embedded-*.png"))
+    assert not (output / "Engineering/Home/Runbook-2").exists()
+
+
+def test_interrupted_first_sync_reuses_checkpointed_embedded_resource(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import gitee_wiki_markdown_exporter.exporter as exporter_module
+
+    client = FakeWikiClient()
+    client.tree = (TreeNode(1, "Home", "root"),)
+    client.attachments[1] = ()
+    client.bodies[1] = "![inline](/wiki-static/demo/1/inline.png)"
+    output = tmp_path / "mirror"
+    original_render_document = exporter_module._render_document
+
+    def crash_after_resources(*_args, **_kwargs) -> str:
+        raise RuntimeError("simulated process interruption")
+
+    monkeypatch.setattr(exporter_module, "_render_document", crash_after_resources)
+    with pytest.raises(ExportError, match="simulated process interruption"):
+        WikiExporter(client=client, settings=settings(output)).sync_spaces(("ENG",))
+
+    monkeypatch.setattr(exporter_module, "_render_document", original_render_document)
+    client.download_reads.clear()
+
+    result = WikiExporter(client=client, settings=settings(output)).sync_spaces(("ENG",))
+
+    assert result.status == "ok"
+    assert client.download_reads == []
+
+
 def test_second_sync_polls_metadata_but_skips_unchanged_page_and_attachment_bytes(
     tmp_path: Path,
 ) -> None:
@@ -651,9 +791,10 @@ def test_attachment_changes_sync_without_a_page_revision_change(tmp_path: Path) 
 
     assert result.updated == 1
     assert client.revision_reads == [2]
-    assert client.download_reads == ["demo/2/new.png"]
+    assert client.download_reads == ["demo/2/new.png", "/wiki-static/demo/2/diagram.png"]
     assert not (output / "Engineering/Home/Runbook/99.png").exists()
     assert (output / "Engineering/Home/Runbook/100.png").read_bytes() == b"png"
+    assert list((output / "Engineering/Home/Runbook-2").glob("embedded-*.png"))
 
 
 def test_attachment_upload_timestamp_triggers_download_when_other_metadata_is_stable(

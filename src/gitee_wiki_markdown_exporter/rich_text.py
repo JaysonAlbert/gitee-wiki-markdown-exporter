@@ -14,13 +14,16 @@ MarkDelimiter = str | Callable[[RichTextNode], str]
 
 _ESCAPABLE_TEXT = re.compile(r"[`*\\~\[\]_]")
 _BLOCK_NODE_TYPES = {
+    "attachments",
     "blockquote",
     "bulletList",
     "codeBlock",
     "doc",
     "diagram",
+    "directory",
     "heading",
     "horizontalRule",
+    "infoBlock",
     "layout",
     "layoutRow",
     "listItem",
@@ -30,6 +33,8 @@ _BLOCK_NODE_TYPES = {
     "tableCell",
     "tableHeader",
     "tableRow",
+    "taskItem",
+    "taskList",
 }
 
 
@@ -62,10 +67,14 @@ class MarkdownSerializer:
         document: RichTextNode,
         *,
         diagram_links: Mapping[int, tuple[str, ...]] | None = None,
+        attachment_links: Mapping[int, tuple[str, str]] | None = None,
     ) -> str:
-        return MarkdownSerializerState(self, diagram_links=diagram_links).render_blocks(
-            _children(document)
-        )
+        return MarkdownSerializerState(
+            self,
+            diagram_links=diagram_links,
+            attachment_links=attachment_links,
+            directory_headings=_directory_headings(document),
+        ).render_blocks(_children(document))
 
 
 class MarkdownSerializerState:
@@ -76,9 +85,13 @@ class MarkdownSerializerState:
         serializer: MarkdownSerializer,
         *,
         diagram_links: Mapping[int, tuple[str, ...]] | None = None,
+        attachment_links: Mapping[int, tuple[str, str]] | None = None,
+        directory_headings: tuple[tuple[int, str, str], ...] = (),
     ) -> None:
         self.serializer = serializer
         self.diagram_links = diagram_links or {}
+        self.attachment_links = attachment_links or {}
+        self.directory_headings = directory_headings
         self.at_line_start = True
 
     def render_blocks(self, nodes: list[RichTextNode]) -> str:
@@ -170,6 +183,7 @@ def render_wiki_content(
     content: str,
     *,
     diagram_links: Mapping[int, tuple[str, ...]] | None = None,
+    attachment_links: Mapping[int, tuple[str, str]] | None = None,
 ) -> str:
     """Convert an observed Gitee rich-text document, preserving other text verbatim."""
     stripped = content.strip()
@@ -184,7 +198,11 @@ def render_wiki_content(
     document = payload.get("default", payload)
     if not isinstance(document, dict) or document.get("type") != "doc":
         return content
-    return GITEE_MARKDOWN_SERIALIZER.serialize(document, diagram_links=diagram_links)
+    return GITEE_MARKDOWN_SERIALIZER.serialize(
+        document,
+        diagram_links=diagram_links,
+        attachment_links=attachment_links,
+    )
 
 
 def find_diagram_references(content: str) -> tuple[tuple[int, str | None], ...]:
@@ -273,7 +291,9 @@ def _render_list_item_with_marker(
     primary: list[str] = []
     nested: list[str] = []
     for child in _children(node):
-        target = nested if child.get("type") in {"bulletList", "orderedList"} else primary
+        target = (
+            nested if child.get("type") in {"bulletList", "orderedList", "taskList"} else primary
+        )
         value = state.render_block(child)
         if value:
             target.append(value)
@@ -307,10 +327,39 @@ def _render_horizontal_rule(_state: MarkdownSerializerState, _node: RichTextNode
 
 def _render_table(state: MarkdownSerializerState, node: RichTextNode) -> str:
     rows: list[list[str]] = []
+    active_rowspans: dict[int, int] = {}
     for row in _children(node):
         if row.get("type") != "tableRow":
             continue
-        rows.append([_render_table_cell(state, cell) for cell in _children(row)])
+        occupied = set(active_rowspans)
+        next_rowspans = {
+            column: remaining - 1 for column, remaining in active_rowspans.items() if remaining > 1
+        }
+        rendered: list[str] = []
+        column = 0
+        for cell in _children(row):
+            if cell.get("type") not in {"tableCell", "tableHeader"}:
+                continue
+            while column in occupied:
+                _set_table_cell(rendered, column, "")
+                column += 1
+            attrs = _attrs(cell)
+            colspan = _positive_int(attrs.get("colspan"), default=1)
+            rowspan = _positive_int(attrs.get("rowspan"), default=1)
+            _set_table_cell(rendered, column, _render_table_cell(state, cell))
+            for offset in range(colspan):
+                covered = column + offset
+                if offset:
+                    _set_table_cell(rendered, covered, "")
+                if rowspan > 1:
+                    next_rowspans[covered] = max(next_rowspans.get(covered, 0), rowspan - 1)
+            column += colspan
+        if occupied:
+            last_occupied = max(occupied)
+            while len(rendered) <= last_occupied:
+                rendered.append("")
+        rows.append(rendered)
+        active_rowspans = next_rowspans
     if not rows:
         return ""
     width = max(len(row) for row in rows)
@@ -333,6 +382,12 @@ def _render_table_cell(state: MarkdownSerializerState, node: RichTextNode) -> st
 
 def _table_row(cells: list[str]) -> str:
     return f"| {' | '.join(cells)} |"
+
+
+def _set_table_cell(row: list[str], column: int, value: str) -> None:
+    while len(row) <= column:
+        row.append("")
+    row[column] = value
 
 
 def _render_text(state: MarkdownSerializerState, node: RichTextNode) -> str:
@@ -366,6 +421,69 @@ def _render_diagram(state: MarkdownSerializerState, node: RichTextNode) -> str:
     return "\n\n".join(
         f"![draw.io diagram {page}]({_escape_link_destination(link)})"
         for page, link in enumerate(links, start=1)
+    )
+
+
+def _render_task_list(state: MarkdownSerializerState, node: RichTextNode) -> str:
+    rendered: list[str] = []
+    for child in _children(node):
+        if child.get("type") != "taskItem":
+            fallback = state.render_block(child)
+            if fallback:
+                rendered.append(fallback)
+            continue
+        checked = _attrs(child).get("checked") is True
+        rendered.append(
+            _render_list_item_with_marker(state, child, marker="- [x]" if checked else "- [ ]")
+        )
+    return "\n".join(rendered)
+
+
+def _render_task_item(state: MarkdownSerializerState, node: RichTextNode) -> str:
+    checked = _attrs(node).get("checked") is True
+    return _render_list_item_with_marker(state, node, marker="- [x]" if checked else "- [ ]")
+
+
+def _render_status(state: MarkdownSerializerState, node: RichTextNode) -> str:
+    title = _attrs(node).get("title")
+    return f"**{state.escape(str(title))}**" if title else ""
+
+
+def _render_info_block(state: MarkdownSerializerState, node: RichTextNode) -> str:
+    icon = str(_attrs(node).get("info-block-icon") or "info").lower()
+    kind = {
+        "error": "CAUTION",
+        "success": "TIP",
+        "warning": "WARNING",
+    }.get(icon, "NOTE")
+    body = state.render_blocks(_children(node))
+    quoted = "\n".join(f"> {line}" if line else ">" for line in body.splitlines())
+    return f"> [!{kind}]" + (f"\n{quoted}" if quoted else "")
+
+
+def _render_attachments(state: MarkdownSerializerState, node: RichTextNode) -> str:
+    raw_ids = _attrs(node).get("attachment-checked-list")
+    attachment_ids = _attachment_ids(raw_ids)
+    if not attachment_ids:
+        attachment_ids = tuple(state.attachment_links)
+    lines: list[str] = []
+    for attachment_id in attachment_ids:
+        item = state.attachment_links.get(attachment_id)
+        if item is None:
+            lines.append(f"- Attachment {attachment_id} was not exported.")
+            continue
+        name, link = item
+        lines.append(f"- [{state.escape(name)}]({_escape_link_destination(link)})")
+    return "\n".join(lines)
+
+
+def _render_directory(state: MarkdownSerializerState, _node: RichTextNode) -> str:
+    if not state.directory_headings:
+        return ""
+    minimum = min(level for level, _title, _slug in state.directory_headings)
+    return "\n".join(
+        f"{'  ' * (level - minimum)}- [{state.escape(title)}](#{slug})"
+        for level, title, slug in state.directory_headings
     )
 
 
@@ -471,6 +589,48 @@ def _int_attr(value: object) -> int | None:
         return None
 
 
+def _positive_int(value: object, *, default: int) -> int:
+    parsed = _int_attr(value)
+    return parsed if parsed is not None and parsed > 0 else default
+
+
+def _attachment_ids(value: object) -> tuple[int, ...]:
+    if isinstance(value, list):
+        candidates = value
+    elif isinstance(value, str):
+        candidates = value.split(",")
+    else:
+        candidates = []
+    result: list[int] = []
+    for candidate in candidates:
+        parsed = _int_attr(str(candidate).strip())
+        if parsed is not None and parsed not in result:
+            result.append(parsed)
+    return tuple(result)
+
+
+def _directory_headings(document: RichTextNode) -> tuple[tuple[int, str, str], ...]:
+    headings: list[tuple[int, str, str]] = []
+    slugs: dict[str, int] = {}
+
+    def visit(node: RichTextNode) -> None:
+        if node.get("type") == "heading":
+            title = _plain_text(_children(node)).strip()
+            if title:
+                level = _positive_int(_attrs(node).get("level"), default=1)
+                base = re.sub(r"[^\w\- ]", "", title.lower()).strip().replace(" ", "-")
+                base = re.sub(r"-+", "-", base) or "section"
+                occurrence = slugs.get(base, 0)
+                slugs[base] = occurrence + 1
+                slug = base if occurrence == 0 else f"{base}-{occurrence}"
+                headings.append((min(level, 6), title, slug))
+        for child in _children(node):
+            visit(child)
+
+    visit(document)
+    return tuple(headings)
+
+
 def _longest_run(value: str, character: str) -> int:
     longest = current = 0
     for candidate in value:
@@ -483,14 +643,17 @@ def _longest_run(value: str, character: str) -> int:
 
 
 GITEE_NODE_SERIALIZERS: dict[str, NodeRenderer] = {
+    "attachments": _render_attachments,
     "blockquote": _render_blockquote,
     "bulletList": _render_bullet_list,
     "codeBlock": _render_code_block,
     "diagram": _render_diagram,
+    "directory": _render_directory,
     "doc": _render_container,
     "hardBreak": _render_hard_break,
     "heading": _render_heading,
     "horizontalRule": _render_horizontal_rule,
+    "infoBlock": _render_info_block,
     "image": _render_image,
     "layout": _render_container,
     "layoutRow": _render_container,
@@ -500,10 +663,13 @@ GITEE_NODE_SERIALIZERS: dict[str, NodeRenderer] = {
     "mention": _render_mention,
     "orderedList": _render_ordered_list,
     "paragraph": _render_paragraph,
+    "status": _render_status,
     "table": _render_table,
     "tableCell": _render_table_container,
     "tableHeader": _render_table_container,
     "tableRow": _render_table_container,
+    "taskItem": _render_task_item,
+    "taskList": _render_task_list,
     "text": _render_text,
 }
 

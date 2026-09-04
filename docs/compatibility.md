@@ -23,12 +23,21 @@ Attachment listing is a read-only query despite using `POST`; it paginates with 
 
 Some installations label a revision as `text` while `data.content` is a JSON object whose
 `default` property contains a ProseMirror-style `doc`. The exporter recognizes that exact envelope
-and renders common headings, paragraphs, marks and links, lists, blockquotes, code blocks, layout
-containers, and tables as Markdown. Markdown-significant characters in text and link targets are
-escaped, adjacent text fragments with the same marks are serialized as one marked span, and code
-fences expand when their content contains backticks. Unknown container nodes retain recognized
-descendants. Invalid or unrecognized top-level JSON remains plain text rather than being guessed
-at. Binary YDoc state is not supported.
+and renders common headings, paragraphs, marks and links, lists and task lists, blockquotes, code
+blocks, layout containers, status labels, information blocks, attachment lists, document
+directories, and tables as Markdown. Table spans are expanded into a rectangular Markdown grid so
+later cells keep their logical column even though GFM cannot display merged cells. Markdown-
+significant characters in text and link targets are escaped, adjacent text fragments with the same
+marks are serialized as one marked span, and code fences expand when their content contains
+backticks. Unknown container nodes retain recognized descendants. Invalid or unrecognized
+top-level JSON remains plain text rather than being guessed at. Binary YDoc state is not supported.
+
+Some rich-text image and link nodes reference `/wiki-static/` objects that the attachment-list
+endpoint does not return. The exporter discovers those remaining Markdown destinations, downloads
+same-origin objects through the same bounded attachment transport, records them as embedded
+resources, and rewrites successful downloads to local paths. Failed downloads remain query-free
+absolute remote links and are retried by the next synchronization. Root-relative Gitee Confluence
+redirect links are also made absolute so they remain usable outside the Gitee web application.
 
 An observed `diagram` node stores a component page ID rather than a stable SVG URL. The exporter
 fetches that component's draw.io XML and uses a local headless Chrome-compatible browser with the

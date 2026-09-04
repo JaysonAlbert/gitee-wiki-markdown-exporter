@@ -138,14 +138,17 @@ Example cron entry:
 ## Incremental behavior
 
 The exporter keeps `gitee-wiki-lock.json` in the output root. For every page it records the Gitee
-page ID, current revision, Markdown renderer version, local path, tree parent, and downloaded
-attachments and diagrams. A renderer upgrade refreshes the affected page once even when its Gitee
-revision has not changed.
+page ID, current revision, Markdown renderer version, local path, tree parent, downloaded
+attachments and embedded resources, and diagrams. A renderer upgrade refreshes the affected page
+once even when its Gitee revision has not changed.
 
 - unchanged revision, title, path, attachment metadata, and recorded diagram hashes: skip the page
   body and attachment bytes, and reuse existing SVG files;
 - changed revision or attachment metadata: refresh the Markdown page while reusing unchanged
   attachment files;
+- remaining `/wiki-static/` image or link destinations that are not present in attachment metadata:
+  download them as managed embedded resources, rewrite successful downloads to local paths, and
+  retry failed resources on the next synchronization;
 - changed draw.io component hash: refresh the Markdown page and rerender that component as SVG even
   when the host-page revision is unchanged;
 - failed attachment download: continue exporting the page, report the run as `partial`, preserve a
@@ -155,15 +158,18 @@ revision has not changed.
 - failed diagram fetch or render: preserve the last successful SVG when available, otherwise emit
   a visible placeholder, report the run as `partial`, and retry on the next synchronization;
 - renamed or moved page: update its generated title/path and reuse unchanged attachments;
+- Gitee Confluence redirect links: make root-relative destinations absolute so links still open
+  outside the Gitee web application;
 - deleted page during a complete-space sync: remove its managed local files when
   `cleanup_stale` is enabled;
 - failure before the directory swap: keep the previous output directory and lockfile intact.
 
 An interrupted first complete-space export to a new output directory automatically resumes on the
 next run when the command targets the same output, spaces, provider identity, exporter version, and
-export settings. Completed pages, downloaded attachments, and rendered draw.io SVGs are reused
-after their current remote metadata or content hash is checked. The incomplete mirror remains in a
-hidden checkpoint beside the output directory and is never exposed as the live mirror.
+export settings. Completed pages, downloaded attachments and embedded resources, and rendered
+draw.io SVGs are reused after their current remote metadata or content hash is checked. The
+incomplete mirror remains in a hidden checkpoint beside the output directory and is never exposed
+as the live mirror.
 
 Checkpoint recovery is automatic for `spaces` and configured `sync` runs, so there are no public
 `--resume` or `--clear` options. A checkpoint with malformed metadata, missing files, or a different
