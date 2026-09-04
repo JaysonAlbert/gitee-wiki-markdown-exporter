@@ -26,12 +26,17 @@ def load_manifest(path: Path) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ManifestError(f"cannot read manifest {path}: {error}") from error
+    return validate_manifest(payload, label=str(path))
+
+
+def validate_manifest(payload: object, *, label: str = "manifest") -> dict[str, Any]:
+    """Validate and return an in-memory synchronization manifest."""
     if not isinstance(payload, dict) or payload.get("schemaVersion") != SCHEMA_VERSION:
-        raise ManifestError(f"unsupported manifest schema in {path}")
+        raise ManifestError(f"unsupported manifest schema in {label}")
     if payload.get("provider") != "gitee-project-wiki" or not isinstance(
         payload.get("spaces"), dict
     ):
-        raise ManifestError(f"invalid Gitee Wiki manifest in {path}")
+        raise ManifestError(f"invalid Gitee Wiki manifest in {label}")
     return payload
 
 

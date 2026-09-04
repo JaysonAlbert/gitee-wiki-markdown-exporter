@@ -159,6 +159,18 @@ revision has not changed.
   `cleanup_stale` is enabled;
 - failure before the directory swap: keep the previous output directory and lockfile intact.
 
+An interrupted first complete-space export to a new output directory automatically resumes on the
+next run when the command targets the same output, spaces, provider identity, exporter version, and
+export settings. Completed pages, downloaded attachments, and rendered draw.io SVGs are reused
+after their current remote metadata or content hash is checked. The incomplete mirror remains in a
+hidden checkpoint beside the output directory and is never exposed as the live mirror.
+
+Checkpoint recovery is automatic for `spaces` and configured `sync` runs, so there are no public
+`--resume` or `--clear` options. A checkpoint with malformed metadata, missing files, or a different
+target/configuration/version fingerprint is discarded before a fresh first export. Once the mirror
+is committed, its checkpoint is removed. Concurrent commands for the same output directory fail
+instead of sharing or modifying one another's staging data.
+
 Attachment replacement detection uses the metadata returned by Gitee (ID, name, URL, advertised
 size, content type, and upload timestamp). If a Gitee version replaces bytes without changing any
 of those fields, the change cannot be detected without forcing a full download.
