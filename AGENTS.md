@@ -158,14 +158,3 @@ Report exactly what ran. Do not describe skipped, simulated, or inapplicable che
   fix forward with a new version.
 - Keep PyPI publishing on GitHub OIDC Trusted Publishing. Do not add a long-lived PyPI token to the
   repository or GitHub secrets.
-
-## Git and delivery
-
-- For external GitHub commits, use `Jayson Albert <momeijw@gamil.com>` as author and committer.
-- Use a focused branch prefixed with `codex/` for non-trivial follow-up work unless the user
-  explicitly requests another workflow.
-- Do not push, create a release, or publish a package unless the user requested that external
-  action. Never merge another contributor's work or force-push shared history without explicit
-  authorization.
-- A change is complete only when the relevant checks pass, documentation matches behavior, the
-  worktree is understood, and any remaining live-Gitee compatibility risk is stated clearly.
