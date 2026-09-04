@@ -445,7 +445,6 @@ def _page_metadata(candidate: PageCandidate, revision: int, desired_path: Path) 
         "revision": str(revision),
         "rendererVersion": _MARKDOWN_RENDERER_VERSION,
         "path": desired_path.as_posix(),
-        "attachments": [],
     }
 
 

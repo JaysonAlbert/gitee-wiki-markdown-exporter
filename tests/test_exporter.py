@@ -338,6 +338,26 @@ def test_second_sync_polls_metadata_but_skips_unchanged_page_and_attachment_byte
     assert client.download_reads == []
 
 
+def test_repeated_unchanged_sync_keeps_attachments_reusable(tmp_path: Path) -> None:
+    client = FakeWikiClient()
+    output = tmp_path / "mirror"
+    exporter = WikiExporter(client=client, settings=settings(output))
+    exporter.sync_spaces(("ENG",))
+
+    exporter.sync_spaces(("ENG",))
+    client.revision_reads.clear()
+    client.download_reads.clear()
+
+    result = exporter.sync_spaces(("ENG",))
+
+    assert result.unchanged == 2
+    assert result.updated == 0
+    assert client.revision_reads == []
+    assert client.download_reads == []
+    manifest = json.loads((output / "gitee-wiki-lock.json").read_text(encoding="utf-8"))
+    assert manifest["spaces"]["ENG"]["pages"]["2"]["attachments"][0]["id"] == 99
+
+
 def test_attachment_changes_sync_without_a_page_revision_change(tmp_path: Path) -> None:
     client = FakeWikiClient()
     output = tmp_path / "mirror"
