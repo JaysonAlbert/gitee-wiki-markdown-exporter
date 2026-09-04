@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import errno
 import hashlib
 import json
 import os
@@ -10,13 +11,17 @@ import posixpath
 import re
 import shutil
 import tempfile
+import threading
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
 from uuid import uuid4
 
+from gitee_wiki_markdown_exporter import __version__
 from gitee_wiki_markdown_exporter.client import GiteeWikiError
 from gitee_wiki_markdown_exporter.config import ExportSettings
 from gitee_wiki_markdown_exporter.diagram import (
@@ -24,7 +29,13 @@ from gitee_wiki_markdown_exporter.diagram import (
     DiagramRenderer,
     DiagramRenderError,
 )
-from gitee_wiki_markdown_exporter.manifest import load_manifest, write_manifest
+from gitee_wiki_markdown_exporter.manifest import (
+    ManifestError,
+    empty_manifest,
+    load_manifest,
+    validate_manifest,
+    write_manifest,
+)
 from gitee_wiki_markdown_exporter.models import (
     Attachment,
     DiagramComponent,
@@ -43,6 +54,10 @@ from gitee_wiki_markdown_exporter.paths import (
 from gitee_wiki_markdown_exporter.rich_text import find_diagram_references, render_wiki_content
 
 _MARKDOWN_RENDERER_VERSION = 4
+_CHECKPOINT_SCHEMA_VERSION = 1
+_CHECKPOINT_PARTIAL = "_checkpointPartial"
+_OUTPUT_LOCK_GUARD = threading.Lock()
+_OUTPUT_LOCKS: set[Path] = set()
 
 
 class WikiReader(Protocol):
@@ -88,6 +103,331 @@ class _PageRemoteState:
     attachments: tuple[Attachment, ...]
 
 
+@dataclass(frozen=True)
+class _Checkpoint:
+    staging: Path
+    sidecar: Path
+    state: Path
+    fingerprint: str
+
+    def initialize(self) -> None:
+        payload = {
+            "schemaVersion": _CHECKPOINT_SCHEMA_VERSION,
+            "provider": "gitee-project-wiki",
+            "fingerprint": self.fingerprint,
+        }
+        temporary = self.state / "header.json"
+        _atomic_write_text(
+            temporary,
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        )
+        temporary.replace(self.sidecar)
+
+    def persist_space(self, space_key: str, space: dict[str, Any]) -> None:
+        payload = {"kind": "space", "space": _checkpoint_space_metadata(space)}
+        _atomic_write_text(
+            self.state / _checkpoint_state_name("space", space_key),
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        )
+
+    def persist_page(
+        self,
+        space_key: str,
+        space: dict[str, Any],
+        page_key: str,
+        entry: dict[str, Any],
+    ) -> None:
+        payload = {
+            "kind": "page",
+            "space": _checkpoint_space_metadata(space),
+            "pageKey": page_key,
+            "entry": entry,
+        }
+        _atomic_write_text(
+            self.state / _checkpoint_state_name("page", space_key, page_key),
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        )
+
+    def delete_page(self, space_key: str, page_key: str) -> None:
+        (self.state / _checkpoint_state_name("page", space_key, page_key)).unlink(missing_ok=True)
+
+
+def _checkpoint_paths(output: Path) -> tuple[Path, Path, Path]:
+    return (
+        output.parent / f".{output.name}.checkpoint",
+        output.parent / f".{output.name}.checkpoint.json",
+        output.parent / f".{output.name}.checkpoint-state",
+    )
+
+
+def _checkpoint_state_name(kind: str, *identity: str) -> str:
+    digest = hashlib.sha256("\0".join(identity).encode("utf-8")).hexdigest()
+    return f"{kind}-{digest}.json"
+
+
+def _checkpoint_space_metadata(space: dict[str, Any]) -> dict[str, Any]:
+    return {key: space[key] for key in ("id", "key", "name")}
+
+
+def _checkpoint_fingerprint(
+    *,
+    output: Path,
+    settings: ExportSettings,
+    client: WikiReader,
+    selections: tuple[Selection, ...],
+) -> str:
+    provider_identity = hashlib.sha256(
+        (client.base_url.rstrip("/") + "\0" + str(getattr(client, "tenant_id", ""))).encode("utf-8")
+    ).hexdigest()
+    payload = {
+        "checkpointSchemaVersion": _CHECKPOINT_SCHEMA_VERSION,
+        "applicationVersion": __version__,
+        "rendererVersion": _MARKDOWN_RENDERER_VERSION,
+        "providerIdentity": provider_identity,
+        "output": str(output.resolve()),
+        "settings": {
+            "pagePath": settings.page_path,
+            "attachmentPath": settings.attachment_path,
+            "diagramPath": settings.diagram_path,
+            "includeDocumentTitle": settings.include_document_title,
+            "includeYamlFrontmatter": settings.include_yaml_frontmatter,
+            "skipUnchanged": settings.skip_unchanged,
+            "cleanupStale": settings.cleanup_stale,
+            "lockfileName": settings.lockfile_name,
+            "maxAttachmentBytes": settings.max_attachment_bytes,
+        },
+        "selections": [
+            {
+                "spaceKey": selection.space_key,
+                "pageIds": list(selection.page_ids),
+                "descendants": selection.descendants,
+                "completeSpace": selection.complete_space,
+                "cleanupStale": selection.cleanup_stale,
+            }
+            for selection in selections
+        ],
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _prepare_checkpoint(
+    *,
+    output: Path,
+    settings: ExportSettings,
+    client: WikiReader,
+    selections: tuple[Selection, ...],
+) -> tuple[_Checkpoint, dict[str, Any], bool]:
+    staging, sidecar, state = _checkpoint_paths(output)
+    fingerprint = _checkpoint_fingerprint(
+        output=output,
+        settings=settings,
+        client=client,
+        selections=selections,
+    )
+    checkpoint = _Checkpoint(
+        staging=staging,
+        sidecar=sidecar,
+        state=state,
+        fingerprint=fingerprint,
+    )
+    resumed = _load_checkpoint(checkpoint)
+    if resumed is not None:
+        return checkpoint, resumed, True
+
+    _discard_checkpoint(staging, sidecar, state)
+    staging.mkdir()
+    state.mkdir()
+    if output.exists():
+        shutil.copytree(output, staging, dirs_exist_ok=True, copy_function=_link_or_copy)
+    checkpoint.initialize()
+    return checkpoint, empty_manifest(), False
+
+
+def _load_checkpoint(checkpoint: _Checkpoint) -> dict[str, Any] | None:
+    if not any(
+        path.exists() for path in (checkpoint.staging, checkpoint.sidecar, checkpoint.state)
+    ):
+        return None
+    if (
+        not checkpoint.staging.is_dir()
+        or checkpoint.staging.is_symlink()
+        or not checkpoint.sidecar.is_file()
+        or checkpoint.sidecar.is_symlink()
+        or not checkpoint.state.is_dir()
+        or checkpoint.state.is_symlink()
+    ):
+        return None
+    try:
+        payload = json.loads(checkpoint.sidecar.read_text(encoding="utf-8"))
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schemaVersion") != _CHECKPOINT_SCHEMA_VERSION
+            or payload.get("provider") != "gitee-project-wiki"
+            or payload.get("fingerprint") != checkpoint.fingerprint
+        ):
+            return None
+        manifest = _load_checkpoint_state(checkpoint.state)
+        validate_manifest(manifest, label="checkpoint")
+        if not _checkpoint_files_exist(checkpoint.staging, manifest):
+            return None
+        return manifest
+    except (OSError, json.JSONDecodeError, ManifestError, ExportError):
+        return None
+
+
+def _load_checkpoint_state(state: Path) -> dict[str, Any]:
+    manifest = empty_manifest()
+    spaces = manifest["spaces"]
+    for path in sorted(state.glob("*.json")):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or payload.get("kind") not in {"space", "page"}:
+            raise ManifestError("invalid checkpoint state record")
+        space = payload.get("space")
+        if not isinstance(space, dict) or set(space) != {"id", "key", "name"}:
+            raise ManifestError("invalid checkpoint space state")
+        space_key = space.get("key")
+        if not isinstance(space_key, str) or not space_key:
+            raise ManifestError("invalid checkpoint space key")
+        kind = str(payload["kind"])
+        page_key = payload.get("pageKey")
+        identity = (space_key,) if kind == "space" else (space_key, str(page_key))
+        if path.name != _checkpoint_state_name(kind, *identity):
+            raise ManifestError("checkpoint state identity mismatch")
+        existing = spaces.setdefault(space_key, {**space, "pages": {}})
+        if not isinstance(existing, dict) or _checkpoint_space_metadata(existing) != space:
+            raise ManifestError("conflicting checkpoint space state")
+        if kind == "page":
+            entry = payload.get("entry")
+            if not isinstance(page_key, str) or not page_key or not isinstance(entry, dict):
+                raise ManifestError("invalid checkpoint page state")
+            existing["pages"][page_key] = entry
+    return manifest
+
+
+def _checkpoint_files_exist(staging: Path, manifest: dict[str, Any]) -> bool:
+    spaces = manifest.get("spaces")
+    if not isinstance(spaces, dict):
+        return False
+    for space in spaces.values():
+        if not isinstance(space, dict) or not isinstance(space.get("pages"), dict):
+            return False
+        for entry in space["pages"].values():
+            if not isinstance(entry, dict):
+                return False
+            page_path = _manifest_path(entry.get("path"))
+            if page_path is None:
+                return False
+            if entry.get(_CHECKPOINT_PARTIAL) is not True and not (staging / page_path).is_file():
+                return False
+            attachments = entry.get("attachments")
+            if not isinstance(attachments, list) or not _attachments_exist(staging, attachments):
+                return False
+            diagrams = entry.get("diagrams")
+            if not isinstance(diagrams, list) or not _diagrams_exist(staging, diagrams):
+                return False
+    return True
+
+
+def _discard_checkpoint(staging: Path, sidecar: Path, state: Path) -> None:
+    for path in (staging, sidecar, state):
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.exists():
+            shutil.rmtree(path)
+
+
+@contextmanager
+def _output_lock(output: Path) -> Iterator[None]:
+    lock_path = output.parent / f".{output.name}.sync.lock"
+    lock_key = lock_path.resolve()
+    with _OUTPUT_LOCK_GUARD:
+        if lock_key in _OUTPUT_LOCKS:
+            raise ExportError(f"another process is already synchronizing {output}")
+        _OUTPUT_LOCKS.add(lock_key)
+    try:
+        handle = lock_path.open("a+b")
+        try:
+            handle.seek(0)
+            if handle.read(1) == b"":
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                if error.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                    raise ExportError(
+                        f"another process is already synchronizing {output}"
+                    ) from error
+                raise
+            try:
+                yield
+            finally:
+                if os.name == "nt":
+                    import msvcrt
+
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+    finally:
+        with _OUTPUT_LOCK_GUARD:
+            _OUTPUT_LOCKS.remove(lock_key)
+
+
+def _save_checkpoint_page(
+    *,
+    checkpoint: _Checkpoint,
+    space_key: str,
+    space: dict[str, Any],
+    pages: dict[str, Any],
+    page_key: str,
+    entry: dict[str, Any],
+) -> None:
+    pages[page_key] = copy.deepcopy(entry)
+    checkpoint.persist_page(space_key, space, page_key, entry)
+
+
+def _checkpoint_page_entry(
+    *,
+    candidate: PageCandidate,
+    revision: int,
+    desired_path: Path,
+    attachments: list[dict[str, object]],
+    diagrams: list[dict[str, object]],
+) -> dict[str, Any]:
+    entry = _page_metadata(candidate, revision, desired_path)
+    entry["attachments"] = copy.deepcopy(attachments)
+    entry["diagrams"] = copy.deepcopy(diagrams)
+    entry["diagramsComplete"] = False
+    entry[_CHECKPOINT_PARTIAL] = True
+    return entry
+
+
+def _remove_checkpoint_fields(manifest: dict[str, Any]) -> None:
+    spaces = manifest.get("spaces")
+    if not isinstance(spaces, dict):
+        return
+    for space in spaces.values():
+        if not isinstance(space, dict) or not isinstance(space.get("pages"), dict):
+            continue
+        for entry in space["pages"].values():
+            if isinstance(entry, dict):
+                entry.pop(_CHECKPOINT_PARTIAL, None)
+
+
 class WikiExporter:
     """Build and atomically replace a local Wiki mirror."""
 
@@ -128,14 +468,33 @@ class WikiExporter:
     def _sync(self, selections: tuple[Selection, ...]) -> SyncResult:
         output = self.settings.output_path
         output.parent.mkdir(parents=True, exist_ok=True)
-        previous = load_manifest(output / self.settings.lockfile_name)
-        next_manifest = copy.deepcopy(previous)
-        staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.staging-", dir=output.parent))
+        with _output_lock(output):
+            return self._sync_locked(selections)
+
+    def _sync_locked(self, selections: tuple[Selection, ...]) -> SyncResult:
+        output = self.settings.output_path
+        manifest_path = output / self.settings.lockfile_name
+        previous = load_manifest(manifest_path)
+        checkpoint: _Checkpoint | None = None
+        checkpoint_resumed = False
+        if not output.exists() and all(selection.complete_space for selection in selections):
+            checkpoint, previous, checkpoint_resumed = _prepare_checkpoint(
+                output=output,
+                settings=self.settings,
+                client=self.client,
+                selections=selections,
+            )
+            staging = checkpoint.staging
+            next_manifest = empty_manifest()
+        else:
+            _discard_checkpoint(*_checkpoint_paths(output))
+            next_manifest = copy.deepcopy(previous)
+            staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.staging-", dir=output.parent))
         outcomes: list[PageOutcome] = []
         errors: list[str] = []
         deleted = 0
         try:
-            if output.exists():
+            if output.exists() and checkpoint is None:
                 shutil.copytree(output, staging, dirs_exist_ok=True, copy_function=_link_or_copy)
             for selection in selections:
                 selection_outcomes, selection_deleted, selection_errors = self._sync_selection(
@@ -143,18 +502,27 @@ class WikiExporter:
                     previous=previous,
                     next_manifest=next_manifest,
                     selection=selection,
+                    checkpoint=checkpoint,
+                    checkpoint_resumed=checkpoint_resumed,
                 )
                 outcomes.extend(selection_outcomes)
                 deleted += selection_deleted
                 errors.extend(selection_errors)
+            _remove_checkpoint_fields(next_manifest)
             write_manifest(staging / self.settings.lockfile_name, next_manifest)
             _prune_empty_directories(staging)
             _replace_directory(staging=staging, output=output)
         except Exception as error:
-            shutil.rmtree(staging, ignore_errors=True)
+            if checkpoint is None:
+                shutil.rmtree(staging, ignore_errors=True)
             if isinstance(error, ExportError):
                 raise
             raise ExportError(str(error)) from error
+        if checkpoint is not None:
+            try:
+                _discard_checkpoint(*_checkpoint_paths(output))
+            except OSError:
+                pass
 
         return SyncResult(
             status="partial" if errors else "ok",
@@ -174,6 +542,8 @@ class WikiExporter:
         previous: dict[str, Any],
         next_manifest: dict[str, Any],
         selection: Selection,
+        checkpoint: _Checkpoint | None,
+        checkpoint_resumed: bool,
     ) -> tuple[list[PageOutcome], int, list[str]]:
         space = self.client.get_space(selection.space_key)
         missing: set[int] = set()
@@ -203,12 +573,21 @@ class WikiExporter:
             previous_pages = {}
 
         next_spaces = next_manifest.setdefault("spaces", {})
-        next_space = copy.deepcopy(previous_space) if isinstance(previous_space, dict) else {}
+        next_space = (
+            {}
+            if checkpoint_resumed
+            else copy.deepcopy(previous_space)
+            if isinstance(previous_space, dict)
+            else {}
+        )
         next_space.update({"id": space.id, "key": space.key, "name": space.name})
         next_pages = next_space.setdefault("pages", {})
         if not isinstance(next_pages, dict):
             next_pages = {}
             next_space["pages"] = next_pages
+        next_spaces[space.key] = next_space
+        if checkpoint is not None:
+            checkpoint.persist_space(space.key, next_space)
 
         outcomes: list[PageOutcome] = []
         errors: list[str] = []
@@ -247,8 +626,25 @@ class WikiExporter:
                 attachments=remote_state.attachments,
                 desired_path=desired_path,
                 old_entry=old_entry,
+                checkpoint_resumed=checkpoint_resumed,
+                save_progress=(
+                    (
+                        lambda progress_entry, page_key=page_key: _save_checkpoint_page(
+                            checkpoint=checkpoint,
+                            space_key=space.key,
+                            space=next_space,
+                            pages=next_pages,
+                            page_key=page_key,
+                            entry=progress_entry,
+                        )
+                    )
+                    if checkpoint is not None
+                    else None
+                ),
             )
             next_pages[page_key] = entry
+            if checkpoint is not None:
+                checkpoint.persist_page(space.key, next_space, page_key, entry)
             errors.extend(page_errors)
             outcomes.append(
                 PageOutcome(
@@ -260,14 +656,16 @@ class WikiExporter:
             )
 
         deleted = 0
-        if selection.complete_space and selection.cleanup_stale:
+        if selection.complete_space and (selection.cleanup_stale or checkpoint_resumed):
             for page_key in set(previous_pages) - selected_ids:
                 old_entry = previous_pages.get(page_key)
                 if isinstance(old_entry, dict):
                     _remove_managed_entry(staging, old_entry)
                 next_pages.pop(page_key, None)
-                deleted += 1
-        next_spaces[space.key] = next_space
+                if checkpoint is not None:
+                    checkpoint.delete_page(space.key, page_key)
+                if selection.cleanup_stale:
+                    deleted += 1
         return outcomes, deleted, errors
 
     def _read_page_state(self, space_id: int, page_id: int) -> _PageRemoteState:
@@ -286,6 +684,8 @@ class WikiExporter:
         attachments: tuple[Attachment, ...],
         desired_path: Path,
         old_entry: dict[str, Any],
+        checkpoint_resumed: bool,
+        save_progress: Callable[[dict[str, Any]], None] | None,
     ) -> tuple[str, dict[str, Any], list[str]]:
         old_path = _manifest_path(old_entry.get("path"))
         old_attachments = old_entry.get("attachments", [])
@@ -297,7 +697,8 @@ class WikiExporter:
             current_attachments=attachments,
         )
         base_unchanged = (
-            self.settings.skip_unchanged
+            (self.settings.skip_unchanged or checkpoint_resumed)
+            and old_entry.get(_CHECKPOINT_PARTIAL) is not True
             and old_revision == str(revision)
             and old_entry.get("rendererVersion") == _MARKDOWN_RENDERER_VERSION
             and old_entry.get("title") == candidate.title
@@ -402,6 +803,16 @@ class WikiExporter:
             for source in sources:
                 replacements[source] = relative_link
             attachment_entries.append(attachment_entry)
+            if save_progress is not None:
+                save_progress(
+                    _checkpoint_page_entry(
+                        candidate=candidate,
+                        revision=revision,
+                        desired_path=desired_path,
+                        attachments=attachment_entries,
+                        diagrams=diagram_entries,
+                    )
+                )
 
         diagram_links: dict[int, tuple[str, ...]] = {}
         diagrams_complete = True
@@ -456,6 +867,16 @@ class WikiExporter:
                         "paths": [path.as_posix() for path in paths],
                     }
                 )
+                if save_progress is not None:
+                    save_progress(
+                        _checkpoint_page_entry(
+                            candidate=candidate,
+                            revision=revision,
+                            desired_path=desired_path,
+                            attachments=attachment_entries,
+                            diagrams=diagram_entries,
+                        )
+                    )
             except (GiteeWikiError, DiagramRenderError) as error:
                 diagrams_complete = False
                 errors.append(f"page {candidate.page_id} diagram {component_id} skipped: {error}")
@@ -484,6 +905,16 @@ class WikiExporter:
                     preserved = copy.deepcopy(old_diagram)
                     preserved["paths"] = [path.as_posix() for path in paths]
                     diagram_entries.append(preserved)
+                    if save_progress is not None:
+                        save_progress(
+                            _checkpoint_page_entry(
+                                candidate=candidate,
+                                revision=revision,
+                                desired_path=desired_path,
+                                attachments=attachment_entries,
+                                diagrams=diagram_entries,
+                            )
+                        )
 
         body = _rewrite_links(
             render_wiki_content(page.content, diagram_links=diagram_links), replacements

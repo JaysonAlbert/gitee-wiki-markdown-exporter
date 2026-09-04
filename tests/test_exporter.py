@@ -1,5 +1,7 @@
 import json
 import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -830,6 +832,249 @@ def test_failed_run_preserves_previous_complete_mirror(tmp_path: Path) -> None:
 
     assert (output / "gitee-wiki-lock.json").read_bytes() == old_manifest
     assert (output / "Engineering/Home/Runbook-2.md").read_bytes() == old_page
+
+
+def test_interrupted_first_space_sync_reuses_completed_pages_and_cleans_checkpoint(
+    tmp_path: Path,
+) -> None:
+    client = FakeWikiClient()
+    client.attachments[1] = (Attachment(88, "welcome.txt", "demo/1/welcome.txt", size=3),)
+    client.tenant_id = "example-tenant"
+    output = tmp_path / "mirror"
+    client.fail_page = 2
+
+    with pytest.raises(ExportError, match="simulated remote failure"):
+        WikiExporter(client=client, settings=settings(output)).sync_spaces(("ENG",))
+
+    assert not output.exists()
+    assert list(tmp_path.glob(".mirror.checkpoint*"))
+    assert "example-tenant" not in (tmp_path / ".mirror.checkpoint.json").read_text(
+        encoding="utf-8"
+    )
+    client.fail_page = None
+    client.revision_reads.clear()
+    client.download_reads.clear()
+
+    result = WikiExporter(client=client, settings=settings(output)).sync_spaces(("ENG",))
+
+    assert result.unchanged == 1
+    assert result.updated == 1
+    assert client.revision_reads == [2]
+    assert client.download_reads == ["demo/2/diagram.png"]
+    assert not list(tmp_path.glob(".mirror.checkpoint*"))
+    assert "_checkpoint" not in (output / "gitee-wiki-lock.json").read_text(encoding="utf-8")
+
+
+def test_interrupted_page_reuses_checkpointed_attachment(tmp_path: Path) -> None:
+    class CrashingRenderer:
+        def render(self, _xml: str) -> tuple[str, ...]:
+            raise RuntimeError("simulated process interruption")
+
+    client = FakeWikiClient()
+    client.tree = (TreeNode(1, "Home", "root"),)
+    client.bodies[1] = diagram_body()
+    client.attachments[1] = (Attachment(88, "welcome.txt", "demo/1/welcome.txt", size=3),)
+    output = tmp_path / "mirror"
+
+    with pytest.raises(ExportError, match="simulated process interruption"):
+        WikiExporter(
+            client=client,
+            settings=settings(output),
+            diagram_renderer=CrashingRenderer(),
+        ).sync_spaces(("ENG",))
+
+    client.download_reads.clear()
+    renderer = FakeDiagramRenderer()
+
+    result = WikiExporter(
+        client=client,
+        settings=settings(output),
+        diagram_renderer=renderer,
+    ).sync_spaces(("ENG",))
+
+    assert result.status == "ok"
+    assert client.download_reads == []
+    assert len(renderer.calls) == 1
+
+
+def test_interrupted_page_reuses_checkpointed_diagram(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import gitee_wiki_markdown_exporter.exporter as exporter_module
+
+    client = FakeWikiClient()
+    client.tree = (TreeNode(1, "Home", "root"),)
+    client.bodies[1] = diagram_body()
+    output = tmp_path / "mirror"
+    renderer = FakeDiagramRenderer()
+    original_render = exporter_module.render_wiki_content
+
+    def crash_after_resources(*_args, **_kwargs) -> str:
+        raise RuntimeError("simulated process interruption")
+
+    monkeypatch.setattr(exporter_module, "render_wiki_content", crash_after_resources)
+    with pytest.raises(ExportError, match="simulated process interruption"):
+        WikiExporter(
+            client=client,
+            settings=settings(output),
+            diagram_renderer=renderer,
+        ).sync_spaces(("ENG",))
+
+    monkeypatch.setattr(exporter_module, "render_wiki_content", original_render)
+
+    result = WikiExporter(
+        client=client,
+        settings=settings(output),
+        diagram_renderer=renderer,
+    ).sync_spaces(("ENG",))
+
+    assert result.status == "ok"
+    assert len(renderer.calls) == 1
+
+
+def test_corrupt_first_sync_checkpoint_is_discarded(tmp_path: Path) -> None:
+    client = FakeWikiClient()
+    output = tmp_path / "mirror"
+    client.fail_page = 2
+
+    with pytest.raises(ExportError, match="simulated remote failure"):
+        WikiExporter(client=client, settings=settings(output)).sync_spaces(("ENG",))
+
+    sidecar = next(tmp_path.glob(".mirror.checkpoint.json"))
+    sidecar.write_text("not json", encoding="utf-8")
+    client.fail_page = None
+    client.revision_reads.clear()
+
+    WikiExporter(client=client, settings=settings(output)).sync_spaces(("ENG",))
+
+    assert client.revision_reads == [1, 2]
+
+
+def test_changed_export_settings_discard_first_sync_checkpoint(tmp_path: Path) -> None:
+    client = FakeWikiClient()
+    output = tmp_path / "mirror"
+    client.fail_page = 2
+
+    with pytest.raises(ExportError, match="simulated remote failure"):
+        WikiExporter(client=client, settings=settings(output)).sync_spaces(("ENG",))
+
+    client.fail_page = None
+    client.revision_reads.clear()
+    changed_settings = ExportSettings(output_path=output, include_document_title=False)
+
+    WikiExporter(client=client, settings=changed_settings).sync_spaces(("ENG",))
+
+    assert client.revision_reads == [1, 2]
+    assert (output / "Engineering/Home-1.md").read_text(encoding="utf-8") == "Welcome\n"
+
+
+def test_changed_exporter_version_discards_first_sync_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import gitee_wiki_markdown_exporter.exporter as exporter_module
+
+    client = FakeWikiClient()
+    output = tmp_path / "mirror"
+    client.fail_page = 2
+
+    with pytest.raises(ExportError, match="simulated remote failure"):
+        WikiExporter(client=client, settings=settings(output)).sync_spaces(("ENG",))
+
+    client.fail_page = None
+    client.revision_reads.clear()
+    monkeypatch.setattr(exporter_module, "__version__", "next-version")
+
+    WikiExporter(client=client, settings=settings(output)).sync_spaces(("ENG",))
+
+    assert client.revision_reads == [1, 2]
+
+
+def test_changed_complete_space_target_discards_first_sync_checkpoint(tmp_path: Path) -> None:
+    class TargetChangingClient(FakeWikiClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_space = "DOCS"
+
+        def get_space(self, space_key: str) -> Space:
+            if space_key == self.fail_space:
+                raise RuntimeError("simulated remote failure")
+            return super().get_space(space_key)
+
+    client = TargetChangingClient()
+    client.tree = (TreeNode(1, "Home", "root"),)
+    output = tmp_path / "mirror"
+
+    with pytest.raises(ExportError, match="simulated remote failure"):
+        WikiExporter(client=client, settings=settings(output)).sync_spaces(("ENG", "DOCS"))
+
+    client.fail_space = ""
+    client.revision_reads.clear()
+
+    WikiExporter(client=client, settings=settings(output)).sync_spaces(("ENG",))
+
+    assert client.revision_reads == [1]
+
+
+def test_existing_unmanaged_output_does_not_create_a_resumable_checkpoint(
+    tmp_path: Path,
+) -> None:
+    client = FakeWikiClient()
+    output = tmp_path / "mirror"
+    output.mkdir()
+    unmanaged = output / "notes.txt"
+    unmanaged.write_text("keep", encoding="utf-8")
+    client.fail_page = 2
+
+    with pytest.raises(ExportError, match="simulated remote failure"):
+        WikiExporter(client=client, settings=settings(output)).sync_spaces(("ENG",))
+
+    assert unmanaged.read_text(encoding="utf-8") == "keep"
+    assert not list(tmp_path.glob(".mirror.checkpoint*"))
+
+
+def test_missing_checkpoint_file_forces_a_fresh_first_sync(tmp_path: Path) -> None:
+    client = FakeWikiClient()
+    output = tmp_path / "mirror"
+    client.fail_page = 2
+
+    with pytest.raises(ExportError, match="simulated remote failure"):
+        WikiExporter(client=client, settings=settings(output)).sync_spaces(("ENG",))
+
+    checkpoint = tmp_path / ".mirror.checkpoint"
+    (checkpoint / "Engineering/Home-1.md").unlink()
+    client.fail_page = None
+    client.revision_reads.clear()
+
+    WikiExporter(client=client, settings=settings(output)).sync_spaces(("ENG",))
+
+    assert client.revision_reads == [1, 2]
+
+
+def test_concurrent_sync_for_same_output_fails_before_remote_work(tmp_path: Path) -> None:
+    class BlockingClient(FakeWikiClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def get_space(self, space_key: str) -> Space:
+            self.entered.set()
+            assert self.release.wait(timeout=5)
+            return super().get_space(space_key)
+
+    client = BlockingClient()
+    client.tree = (TreeNode(1, "Home", "root"),)
+    output = tmp_path / "mirror"
+    first = WikiExporter(client=client, settings=settings(output))
+    second = WikiExporter(client=client, settings=settings(output))
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(first.sync_spaces, ("ENG",))
+        assert client.entered.wait(timeout=5)
+        with pytest.raises(ExportError, match="already synchronizing"):
+            second.sync_spaces(("ENG",))
+        client.release.set()
+        pending.result(timeout=5)
 
 
 def test_backup_cleanup_failure_does_not_turn_a_committed_swap_into_failure(

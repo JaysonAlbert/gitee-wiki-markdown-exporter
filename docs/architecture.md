@@ -46,6 +46,8 @@ CLI
 4. Compare `(page ID, revision, renderer version, title, rendered path, attachment metadata,
    diagram state)` with the previous manifest.
 5. Build a staging output beside the current output, initially populated from the previous mirror.
+   A first complete-space synchronization uses a stable, private checkpoint staging directory;
+   other runs continue to use disposable random staging.
 6. Download changed page bodies and attachment bytes into staging, reuse unchanged attachments,
    and move unchanged pages whose tree path changed. Fetch draw.io component XML and render every
    diagram page locally as SVG; only SVG output is persisted. If an attachment or diagram fails,
@@ -53,11 +55,54 @@ CLI
    partial-run error, and leave the item incomplete so the next synchronization retries it.
 7. For complete-space selections, remove stale managed files when cleanup is enabled.
 8. Write the next manifest and replace the output directory. Attachment and diagram failures are
-   recoverable pre-swap errors; any other pre-swap failure discards staging and preserves the
-   previous mirror. Backup deletion after a committed swap is best-effort.
+   recoverable pre-swap errors; any other pre-swap failure preserves a valid first-sync checkpoint
+   or discards disposable staging, while the previous mirror remains unchanged. Backup deletion
+   after a committed swap is best-effort.
 
 The manifest is an optimization and cleanup authority, not a remote source of truth. Gitee page
 IDs and revisions remain authoritative.
+
+## First-sync checkpoints
+
+Checkpointing is intentionally limited to an initial complete-space synchronization: every
+selection must cover a complete space and the output directory must not exist yet. An existing
+directory without a synchronization manifest uses disposable staging so checkpoint recovery cannot
+overwrite untracked files changed between attempts. This keeps established incremental semantics
+unchanged. Recovery is automatic rather than a new CLI mode, so scheduled `sync` jobs recover after
+interruption without operator-only flags and the published command surface remains compatible.
+
+The checkpoint staging directory, fingerprint sidecar, and per-page state directory live beside the
+configured output. They are private implementation artifacts and are never copied into the
+committed mirror. A small page-state record is written atomically after each completed page and
+after each successfully materialized attachment or draw.io component; the cumulative manifest is
+not rewritten for every page. File data is committed before a state record refers to it, so a crash
+may leave an unreferenced file but cannot make incomplete bytes reusable. Partial page entries
+deliberately do not claim that the Markdown page is complete; they only authorize reuse of
+validated attachment and diagram files on the next attempt.
+
+A SHA-256 fingerprint binds a checkpoint to:
+
+- the checkpoint schema, package version, and Markdown renderer version;
+- the normalized provider/tenant identity without persisting credentials or the tenant value;
+- the resolved output path and every output-affecting export setting; and
+- the ordered synchronization selections, including spaces, page IDs, descendant mode, complete
+  space mode, and stale-cleanup policy.
+
+Resume reloads only a current-schema checkpoint whose sidecar, staging directory, per-page state,
+fingerprint, reconstructed manifest, and referenced files validate. A missing component, malformed
+or unsupported JSON, unsafe managed path, or fingerprint mismatch causes all managed checkpoint
+artifacts to be removed before a fresh initial export. The live output is never consulted from an
+incompatible checkpoint. If a formal output manifest now exists (for example, the process committed
+the swap immediately before termination), the leftover checkpoint artifacts are stale and are
+removed before the normal incremental run.
+
+One non-blocking process lock is held for the output target across checkpoint preparation, remote
+work, manifest writing, and the final swap. Operating-system lock release on process termination
+makes crash recovery possible without a stale lease timeout. A concurrent invocation for the same
+output fails before reading or mutating staging. Successful replacement is followed by best-effort
+checkpoint artifact cleanup; the empty lock file may remain because deleting a lock path after
+unlocking can race with a new process. Cleanup failure must not reverse or report failure for an
+already committed mirror.
 
 ## Compatibility policy
 

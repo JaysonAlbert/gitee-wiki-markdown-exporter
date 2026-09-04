@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+- Resume interrupted first complete-space exports from validated page, attachment, and draw.io
+  checkpoints without exposing an incomplete mirror as the live output.
+
 ## 0.3.0 - 2026-09-04
 
 - Expand Gitee's lazy-loaded page tree recursively so complete-space exports include every
