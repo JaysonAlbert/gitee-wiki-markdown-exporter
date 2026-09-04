@@ -143,3 +143,12 @@ def render_diagram_path(
     ):
         raise ValueError("diagram template must render a safe relative path")
     return Path(*relative.parts)
+
+
+def render_embedded_resource_path(*, page_path: Path, url_path: str) -> Path:
+    """Return a stable page-scoped path for an unlisted Wiki resource."""
+    suffix = PurePosixPath(url_path).suffix.lower()
+    if not re.fullmatch(r"\.[a-z0-9]{1,10}", suffix):
+        suffix = ""
+    digest = hashlib.sha256(url_path.encode("utf-8")).hexdigest()[:16]
+    return page_path.with_suffix("") / f"embedded-{digest}{suffix}"

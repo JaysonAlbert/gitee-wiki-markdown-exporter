@@ -184,3 +184,121 @@ def test_missing_diagram_svg_is_visible_in_markdown() -> None:
     )
 
     assert render_wiki_content(content) == "> [!WARNING]\n> draw.io diagram 501 was not exported."
+
+
+def test_renders_observed_task_status_info_directory_and_attachment_nodes() -> None:
+    content = json.dumps(
+        {
+            "type": "doc",
+            "content": [
+                {
+                    "type": "heading",
+                    "attrs": {"level": 2},
+                    "content": [{"type": "text", "text": "Getting Started"}],
+                },
+                {"type": "directory", "attrs": {"directory-display-level": ""}},
+                {
+                    "type": "paragraph",
+                    "content": [
+                        {"type": "text", "text": "State: "},
+                        {"type": "status", "attrs": {"title": "Ready", "color": "green"}},
+                    ],
+                },
+                {
+                    "type": "infoBlock",
+                    "attrs": {"info-block-icon": "info"},
+                    "content": [
+                        {
+                            "type": "paragraph",
+                            "content": [{"type": "text", "text": "Read this first."}],
+                        }
+                    ],
+                },
+                {
+                    "type": "taskList",
+                    "content": [
+                        {
+                            "type": "taskItem",
+                            "attrs": {"checked": True},
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": [{"type": "text", "text": "Installed"}],
+                                }
+                            ],
+                        },
+                        {
+                            "type": "taskItem",
+                            "attrs": {"checked": False},
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": [{"type": "text", "text": "Configured"}],
+                                }
+                            ],
+                        },
+                    ],
+                },
+                {
+                    "type": "attachments",
+                    "attrs": {"attachment-checked-list": "99,100"},
+                },
+            ],
+        }
+    )
+
+    assert render_wiki_content(
+        content,
+        attachment_links={99: ("guide.pdf", "Home/99.pdf")},
+    ) == (
+        "## Getting Started\n\n"
+        "- [Getting Started](#getting-started)\n\n"
+        "State: **Ready**\n\n"
+        "> [!NOTE]\n> Read this first.\n\n"
+        "- [x] Installed\n- [ ] Configured\n\n"
+        "- [guide.pdf](Home/99.pdf)\n"
+        "- Attachment 100 was not exported."
+    )
+
+
+def test_expands_table_spans_without_shifting_following_cells() -> None:
+    def cell(value: str, **attrs: int) -> dict[str, object]:
+        return {
+            "type": "tableCell",
+            "attrs": attrs,
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [{"type": "text", "text": value}],
+                }
+            ],
+        }
+
+    content = json.dumps(
+        {
+            "type": "doc",
+            "content": [
+                {
+                    "type": "table",
+                    "content": [
+                        {
+                            "type": "tableRow",
+                            "content": [cell("A", colspan=2), cell("C")],
+                        },
+                        {
+                            "type": "tableRow",
+                            "content": [cell("X", rowspan=2), cell("Y"), cell("Z")],
+                        },
+                        {
+                            "type": "tableRow",
+                            "content": [cell("P"), cell("Q")],
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert render_wiki_content(content) == (
+        "| A |  | C |\n| --- | --- | --- |\n| X | Y | Z |\n|  | P | Q |"
+    )
