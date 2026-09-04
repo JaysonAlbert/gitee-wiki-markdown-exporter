@@ -10,7 +10,8 @@ git clone https://github.com/JaysonAlbert/gitee-wiki-markdown-exporter.git
 cd gitee-wiki-markdown-exporter
 uv sync --dev
 uv run ruff check .
-uv run pytest
+uv run ruff format --check .
+uv run pytest --cov=gitee_wiki_markdown_exporter --cov-report=term-missing
 ```
 
 Tests must not call a production Wiki. Use `httpx.MockTransport` for HTTP contracts and keep all

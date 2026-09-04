@@ -1,8 +1,9 @@
 # gitee-wiki-markdown-exporter
 
 Export Gitee **Project Wiki** spaces and pages to a local Markdown mirror. The first run
-downloads the selected content; later runs compare page revisions and attachment metadata and
-only download changed page bodies and attachment bytes.
+downloads the selected content; later runs expand the selected tree and compare page revisions,
+attachment metadata, and recorded draw.io component hashes. They skip unchanged page bodies and
+attachment bytes and avoid rerendering unchanged diagrams.
 
 > [!IMPORTANT]
 > This project targets the Gitee Project Wiki API exposed under `/api/wiki/`. It is different
@@ -120,6 +121,10 @@ Run the configured daily synchronization:
 gw-export sync --json
 ```
 
+`sync` honors `export.cleanup_stale` from the configuration. The `spaces` command enables stale
+cleanup by default; pass `--no-cleanup-stale` for a one-off complete-space export that must not
+remove previously managed pages.
+
 A successful run exits `0`, a synchronization failure exits `1`, and a configuration or usage
 error exits `2`. This makes `sync` suitable for cron, systemd timers, GitHub Actions, and Harness
 scheduler adapters.
@@ -137,10 +142,12 @@ page ID, current revision, Markdown renderer version, local path, tree parent, a
 attachments and diagrams. A renderer upgrade refreshes the affected page once even when its Gitee
 revision has not changed.
 
-- unchanged revision, title, path, and attachment metadata: skip the page body and attachment
-  bytes;
+- unchanged revision, title, path, attachment metadata, and recorded diagram hashes: skip the page
+  body and attachment bytes, and reuse existing SVG files;
 - changed revision or attachment metadata: refresh the Markdown page while reusing unchanged
   attachment files;
+- changed draw.io component hash: refresh the Markdown page and rerender that component as SVG even
+  when the host-page revision is unchanged;
 - failed attachment download: continue exporting the page, report the run as `partial`, preserve a
   query-free link to the remote attachment, and retry the attachment on the next synchronization;
 - draw.io diagram: poll the component XML hash, render every changed diagram page locally as SVG,
@@ -157,6 +164,11 @@ size, content type, and upload timestamp). If a Gitee version replaces bytes wit
 of those fields, the change cannot be detected without forcing a full download.
 
 Only files recorded in the lockfile are eligible for cleanup.
+
+Complete-space incremental runs still expand the full lazy-loaded tree and poll the latest revision
+and attachment metadata for every selected page. Previously recorded diagrams add one component XML
+request each. Network request volume therefore grows with the number of pages, paginated attachment
+lists, and diagrams even when no page bodies or attachment bytes need downloading.
 
 Skipped attachments are not recorded as successfully downloaded in `gitee-wiki-lock.json`. Human
 output prints a warning for each skipped attachment; `--json` includes the same sanitized messages

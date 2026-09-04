@@ -26,9 +26,9 @@ CLI
   observed Gitee node and mark names to handlers, while a per-document state owns CommonMark
   escaping and nested rendering. Unknown container nodes preserve their supported descendants;
   unrecognized or already-Markdown top-level text still passes through verbatim.
-- `diagram` owns local headless-browser rendering of Gitee draw.io component XML. It loads only the
-  Gitee-hosted preview application, blocks subsequent network requests before injecting diagram
-  content, and returns normalized SVG without persisting editable XML.
+- `diagram` owns local headless-browser rendering of Gitee draw.io component XML. It loads the
+  Gitee-hosted preview application, blocks subsequent cross-origin network requests before
+  injecting diagram content, and returns normalized SVG without persisting editable XML.
 - `paths` owns cross-platform safe filenames and template expansion.
 - `manifest` owns the versioned on-disk synchronization contract.
 - `cli` performs parsing and rendering only; it does not contain synchronization rules.
@@ -39,9 +39,10 @@ CLI
    for complete spaces or descendant selections, read the page tree and expand non-leaf nodes
    through the endpoint's `parent` query until the selected hierarchy is complete.
 2. Flatten selected roots into page records with stable page IDs and ancestor titles.
-3. Read the latest revision ID and attachment metadata for each selected page. Poll component XML
-   hashes for diagrams already recorded in the manifest, because a component may change without a
-   new host-page revision.
+3. Read the latest revision ID and attachment metadata for each selected page through a bounded
+   worker pool while preserving deterministic result ordering. Poll component XML hashes for
+   diagrams already recorded in the manifest, because a component may change without a new
+   host-page revision.
 4. Compare `(page ID, revision, renderer version, title, rendered path, attachment metadata,
    diagram state)` with the previous manifest.
 5. Build a staging output beside the current output, initially populated from the previous mirror.
@@ -80,9 +81,9 @@ content back to Gitee remain outside the read-only exporter boundary.
 - Never include authorization headers or raw tokens in logs, manifests, JSON output, or exceptions.
 - Reject tree-derived paths that escape the configured output root.
 - Bound attachment sizes before buffering them in memory.
-- Follow redirects only within the configured Gitee host by default.
+- Reject off-origin attachment URLs and do not follow HTTP redirects.
 
-## Non-goals for 0.1
+## Non-goals
 
 - publishing Markdown back to Gitee;
 - migrating Confluence history;

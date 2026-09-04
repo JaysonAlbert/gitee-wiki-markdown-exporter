@@ -69,8 +69,8 @@ details into the exporter.
   credentials are allowed in regression tests.
 - Error URLs must omit userinfo, query strings, and fragments. The manifest may store only the
   normalized attachment `urlPath`, never the raw URL.
-- Attachment downloads must remain on the configured Gitee origin, must not follow arbitrary
-  redirects, and must enforce `max_attachment_bytes` while streaming.
+- Attachment downloads must remain on the configured Gitee origin, must not follow redirects, and
+  must enforce `max_attachment_bytes` while streaming.
 
 ### Filesystem and transaction safety
 
