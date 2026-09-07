@@ -1,6 +1,7 @@
 import json
 
 import httpx
+from image_fixtures import png_bytes
 
 from gitee_wiki_markdown_exporter.client import GiteeWikiClient, GiteeWikiError
 
@@ -89,7 +90,7 @@ def test_client_uses_observed_paths_headers_and_envelopes() -> None:
                 },
             )
         if path.endswith("/wiki-static/demo/2/image.png"):
-            return httpx.Response(200, content=b"png", headers={"content-type": "image/png"})
+            return httpx.Response(200, content=png_bytes(), headers={"content-type": "image/png"})
         raise AssertionError(f"unexpected request: {request.method} {request.url}")
 
     http_client = httpx.Client(transport=httpx.MockTransport(handler))
@@ -107,7 +108,7 @@ def test_client_uses_observed_paths_headers_and_envelopes() -> None:
     page = client.get_revision(space.id, 2, revision)
     diagram = client.get_diagram_component(space.key, 501)
     attachments = client.list_attachments(2)
-    content, content_type = client.download_attachment(attachments[0].url, max_bytes=10)
+    content, content_type = client.download_attachment(attachments[0].url, max_bytes=1024)
 
     assert tree[0].children[0].page_id == 2
     assert wiki_page.page_id == 2
@@ -116,7 +117,7 @@ def test_client_uses_observed_paths_headers_and_envelopes() -> None:
     assert page.content == "Body"
     assert diagram.id == 501
     assert diagram.content == '<mxfile><diagram id="a"/></mxfile>'
-    assert content == b"png"
+    assert content == png_bytes()
     assert content_type == "image/png"
     assert attachments[0].updated_at == "2026-01-02T03:04:05Z"
     assert all(request.headers["authorization"] == "Bearer top-secret" for request in requests)

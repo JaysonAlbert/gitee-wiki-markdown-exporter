@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+from image_fixtures import png_bytes
 
 from gitee_wiki_markdown_exporter.client import GiteeWikiError
 from gitee_wiki_markdown_exporter.config import ExportSettings
@@ -113,7 +114,7 @@ class FakeWikiClient:
             raise GiteeWikiError(
                 "GET https://gitee.example.com/wiki-static/failed failed: HTTP 500"
             )
-        return url.encode("utf-8")[-3:], "image/png"
+        return png_bytes(url), "image/png"
 
     def get_diagram_component(self, _space_key: str, component_page_id: int) -> DiagramComponent:
         self.diagram_reads.append(component_page_id)
@@ -169,7 +170,9 @@ def test_first_sync_exports_tree_localizes_attachments_and_writes_manifest(tmp_p
     assert result.updated == 2
     runbook = output / "Engineering/Home/Runbook-2.md"
     assert runbook.read_text(encoding="utf-8") == "# Runbook\n\n![diagram](Runbook/99.png)\n"
-    assert (output / "Engineering/Home/Runbook/99.png").read_bytes() == b"png"
+    assert (output / "Engineering/Home/Runbook/99.png").read_bytes() == png_bytes(
+        "demo/2/diagram.png"
+    )
     manifest = json.loads((output / "gitee-wiki-lock.json").read_text(encoding="utf-8"))
     assert manifest["spaces"]["ENG"]["pages"]["2"]["revision"] == "20"
 
@@ -592,7 +595,7 @@ def test_failed_attachment_is_reported_and_page_export_continues(tmp_path: Path)
 
     assert retry_result.status == "ok"
     assert client.download_reads == [failed_url]
-    assert (output / "Engineering/Home/Runbook/99.png").read_bytes() == b"lue"
+    assert (output / "Engineering/Home/Runbook/99.png").read_bytes() == png_bytes(failed_url)
     assert (output / "Engineering/Home/Runbook-2.md").read_text(encoding="utf-8") == (
         "# Runbook\n\n![diagram](Runbook/99.png)\n"
     )
@@ -621,7 +624,9 @@ def test_unlisted_wiki_static_resource_is_localized_and_reused(tmp_path: Path) -
     resource = entry["embeddedResources"][0]
     assert resource["urlPath"] == "/wiki-static/demo/2/inline.png"
     resource_path = Path(resource["path"])
-    assert (output / resource_path).read_bytes() == b"ret"
+    assert (output / resource_path).read_bytes() == png_bytes(
+        "/wiki-static/demo/2/inline.png?temporary=secret"
+    )
     document = (output / "Engineering/Home/Runbook-2.md").read_text(encoding="utf-8")
     assert f"![inline](Runbook-2/{resource_path.name})" in document
     assert "![example](/wiki-static/examples/not-a-resource.png)" in document
@@ -793,7 +798,7 @@ def test_attachment_changes_sync_without_a_page_revision_change(tmp_path: Path) 
     assert client.revision_reads == [2]
     assert client.download_reads == ["demo/2/new.png", "/wiki-static/demo/2/diagram.png"]
     assert not (output / "Engineering/Home/Runbook/99.png").exists()
-    assert (output / "Engineering/Home/Runbook/100.png").read_bytes() == b"png"
+    assert (output / "Engineering/Home/Runbook/100.png").read_bytes() == png_bytes("demo/2/new.png")
     assert list((output / "Engineering/Home/Runbook-2").glob("embedded-*.png"))
 
 
@@ -899,7 +904,9 @@ def test_page_tree_move_reuses_content_and_rewrites_local_attachment_link(tmp_pa
     assert moved_page.read_text(encoding="utf-8") == (
         "# Operations\n\n![diagram](Operations/99.png)\n"
     )
-    assert (output / "Engineering/Guides/Operations/99.png").read_bytes() == b"png"
+    assert (output / "Engineering/Guides/Operations/99.png").read_bytes() == png_bytes(
+        "demo/2/diagram.png"
+    )
     assert not (output / "Engineering/Home/Runbook-2.md").exists()
 
 

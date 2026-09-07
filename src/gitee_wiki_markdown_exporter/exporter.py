@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlparse
+from urllib.parse import quote, urljoin, urlparse
 from uuid import uuid4
 
 from gitee_wiki_markdown_exporter import __version__
@@ -29,6 +29,7 @@ from gitee_wiki_markdown_exporter.diagram import (
     DiagramRenderer,
     DiagramRenderError,
 )
+from gitee_wiki_markdown_exporter.image_payloads import InvalidImagePayload, validate_image_payload
 from gitee_wiki_markdown_exporter.manifest import (
     ManifestError,
     empty_manifest,
@@ -42,6 +43,7 @@ from gitee_wiki_markdown_exporter.models import (
     PageCandidate,
     PageOutcome,
     PageRevision,
+    ProgressEvent,
     Space,
     SyncResult,
     TreeNode,
@@ -52,9 +54,10 @@ from gitee_wiki_markdown_exporter.paths import (
     render_embedded_resource_path,
     render_page_path,
 )
+from gitee_wiki_markdown_exporter.resource_cache import ResourceCache
 from gitee_wiki_markdown_exporter.rich_text import find_diagram_references, render_wiki_content
 
-_MARKDOWN_RENDERER_VERSION = 5
+_MARKDOWN_RENDERER_VERSION = 6
 _CHECKPOINT_SCHEMA_VERSION = 1
 _CHECKPOINT_PARTIAL = "_checkpointPartial"
 _OUTPUT_LOCK_GUARD = threading.Lock()
@@ -444,9 +447,13 @@ class WikiExporter:
         client: WikiReader,
         settings: ExportSettings,
         diagram_renderer: DiagramRenderer | None = None,
+        progress: Callable[[ProgressEvent], None] | None = None,
     ) -> None:
+        self.progress = progress
+        self._pages_staged = self._downloaded = self._recovered = self._pages_checked = 0
         self.client = client
         self.settings = settings
+        self._resource_cache: ResourceCache | None = None
         self.diagram_renderer = diagram_renderer or ChromeDiagramRenderer(base_url=client.base_url)
 
     def sync_spaces(
@@ -476,7 +483,27 @@ class WikiExporter:
         output = self.settings.output_path
         output.parent.mkdir(parents=True, exist_ok=True)
         with _output_lock(output):
-            return self._sync_locked(selections)
+            self._pages_staged = self._downloaded = self._recovered = self._pages_checked = 0
+            self._report_progress("started")
+            try:
+                result = self._sync_locked(selections)
+            except BaseException:
+                self._report_progress("failed")
+                raise
+            self._report_progress("committed")
+            return result
+
+    def _report_progress(self, phase: str) -> None:
+        if self.progress is not None:
+            self.progress(
+                ProgressEvent(
+                    phase,
+                    self._pages_staged,
+                    self._downloaded,
+                    self._recovered,
+                    self._pages_checked,
+                )
+            )
 
     def _sync_locked(self, selections: tuple[Selection, ...]) -> SyncResult:
         output = self.settings.output_path
@@ -497,10 +524,22 @@ class WikiExporter:
             _discard_checkpoint(*_checkpoint_paths(output))
             next_manifest = copy.deepcopy(previous)
             staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.staging-", dir=output.parent))
+        self._resource_cache = None
         outcomes: list[PageOutcome] = []
         errors: list[str] = []
         deleted = 0
         try:
+            if checkpoint is None:
+                self._resource_cache = ResourceCache(
+                    output,
+                    _checkpoint_fingerprint(
+                        output=output,
+                        settings=self.settings,
+                        client=self.client,
+                        selections=selections,
+                    ),
+                    self.settings.max_attachment_bytes,
+                )
             if output.exists() and checkpoint is None:
                 shutil.copytree(output, staging, dirs_exist_ok=True, copy_function=_link_or_copy)
             for selection in selections:
@@ -519,12 +558,17 @@ class WikiExporter:
             write_manifest(staging / self.settings.lockfile_name, next_manifest)
             _prune_empty_directories(staging)
             _replace_directory(staging=staging, output=output)
-        except Exception as error:
+        except BaseException as error:
             if checkpoint is None:
                 shutil.rmtree(staging, ignore_errors=True)
-            if isinstance(error, ExportError):
+            if isinstance(error, ExportError) or not isinstance(error, Exception):
                 raise
             raise ExportError(str(error)) from error
+        if self._resource_cache is not None:
+            try:
+                self._resource_cache.clear()
+            except OSError:
+                pass
         if checkpoint is not None:
             try:
                 _discard_checkpoint(*_checkpoint_paths(output))
@@ -541,6 +585,47 @@ class WikiExporter:
             pages=tuple(outcomes),
             errors=tuple(errors),
         )
+
+    def _download_resource(
+        self,
+        url: str,
+        *,
+        name: str,
+        expected_content_type: str | None,
+        identity: dict[str, object],
+    ) -> tuple[bytes, str | None]:
+        key = ResourceCache.key(identity)
+        cached = self._resource_cache.load(key) if self._resource_cache is not None else None
+        if cached is not None:
+            try:
+                validate_image_payload(
+                    cached[0],
+                    name=name,
+                    content_type=cached[1],
+                    declared_content_type=expected_content_type,
+                )
+                self._recovered += 1
+                self._report_progress("staging")
+                return cached
+            except InvalidImagePayload:
+                pass
+        content, content_type = self.client.download_attachment(
+            url, max_bytes=self.settings.max_attachment_bytes
+        )
+        try:
+            validate_image_payload(
+                content,
+                name=name,
+                content_type=content_type,
+                declared_content_type=expected_content_type,
+            )
+        except InvalidImagePayload as error:
+            raise GiteeWikiError(str(error)) from error
+        if self._resource_cache is not None:
+            self._resource_cache.save(key, content, content_type)
+        self._downloaded += 1
+        self._report_progress("staging")
+        return content, content_type
 
     def _sync_selection(
         self,
@@ -602,14 +687,18 @@ class WikiExporter:
         if len(candidates) >= 20:
             with ThreadPoolExecutor(max_workers=12, thread_name_prefix="gwme-page-state") as pool:
                 remote_states = tuple(
-                    pool.map(
-                        lambda candidate: self._read_page_state(space.id, candidate.page_id),
-                        candidates,
+                    self._track_page_states(
+                        pool.map(
+                            lambda candidate: self._read_page_state(space.id, candidate.page_id),
+                            candidates,
+                        )
                     )
                 )
         else:
             remote_states = tuple(
-                self._read_page_state(space.id, candidate.page_id) for candidate in candidates
+                self._track_page_states(
+                    self._read_page_state(space.id, candidate.page_id) for candidate in candidates
+                )
             )
         for candidate, remote_state in zip(candidates, remote_states, strict=True):
             page_key = str(candidate.page_id)
@@ -653,6 +742,8 @@ class WikiExporter:
             if checkpoint is not None:
                 checkpoint.persist_page(space.key, next_space, page_key, entry)
             errors.extend(page_errors)
+            self._pages_staged += 1
+            self._report_progress("staging")
             outcomes.append(
                 PageOutcome(
                     page_id=candidate.page_id,
@@ -674,6 +765,12 @@ class WikiExporter:
                 if selection.cleanup_stale:
                     deleted += 1
         return outcomes, deleted, errors
+
+    def _track_page_states(self, states: Iterator[_PageRemoteState]) -> Iterator[_PageRemoteState]:
+        for state in states:
+            self._pages_checked += 1
+            self._report_progress("checking")
+            yield state
 
     def _read_page_state(self, space_id: int, page_id: int) -> _PageRemoteState:
         return _PageRemoteState(
@@ -699,10 +796,23 @@ class WikiExporter:
         old_diagrams = old_entry.get("diagrams", [])
         old_embedded_resources = old_entry.get("embeddedResources", [])
         old_revision = str(old_entry.get("revision", ""))
+        validity: dict[Path, bool] = {}
+
+        def valid_resource(entry: dict[str, Any]) -> bool:
+            path = _manifest_path(entry.get("path"))
+            if path is None:
+                return False
+            if path not in validity:
+                validity[path] = _valid_resource_file(
+                    staging / path, entry, self.settings.max_attachment_bytes
+                )
+            return validity[path]
+
         attachments_unchanged = _attachments_match(
             staging=staging,
             old_attachments=old_attachments,
             current_attachments=attachments,
+            valid_resource=valid_resource,
         )
         base_unchanged = (
             (self.settings.skip_unchanged or checkpoint_resumed)
@@ -713,10 +823,12 @@ class WikiExporter:
             and old_path is not None
             and (staging / old_path).is_file()
             and attachments_unchanged
+            and all(_attachment_same_origin(item.url, self.client.base_url) for item in attachments)
             and old_entry.get("diagramsComplete", True) is True
             and _diagrams_exist(staging, old_diagrams)
             and old_entry.get("embeddedResourcesComplete") is True
             and _embedded_resources_exist(staging, old_embedded_resources)
+            and all(valid_resource(entry) for entry in old_embedded_resources)
         )
         old_diagrams_by_id = _diagram_entries_by_id(old_diagrams)
         diagram_components: dict[int, DiagramComponent] = {}
@@ -759,11 +871,25 @@ class WikiExporter:
         errors: list[str] = []
         replacements: dict[str, str] = {}
         attachment_links: dict[int, tuple[str, str]] = {}
-        listed_attachment_url_paths = {
-            _attachment_url_path(attachment.url) for attachment in attachments
-        }
+        listed_attachment_url_paths: set[str] = set()
         old_by_id = _attachment_entries_by_id(old_attachments)
         for attachment in attachments:
+            try:
+                url_path = _attachment_url_path(attachment.url)
+                if not _attachment_same_origin(attachment.url, self.client.base_url):
+                    raise GiteeWikiError("attachment URL points outside the configured Gitee host")
+                sources = _attachment_source_variants(self.client.base_url, attachment.url)
+            except (ValueError, GiteeWikiError) as error:
+                reason = (
+                    "invalid_attachment_url: malformed URL"
+                    if isinstance(error, ValueError)
+                    else str(error)
+                )
+                errors.append(
+                    f"page {candidate.page_id} attachment {attachment.id} skipped: {reason}"
+                )
+                continue
+            listed_attachment_url_paths.add(url_path)
             attachment_path = render_attachment_path(
                 self.settings.attachment_path,
                 page_path=desired_path,
@@ -775,7 +901,6 @@ class WikiExporter:
             old_attachment_path = (
                 _manifest_path(old_attachment.get("path")) if old_attachment else None
             )
-            sources = _attachment_source_variants(self.client.base_url, attachment.url)
             if old_attachment is not None and isinstance(old_attachment.get("urlPath"), str):
                 sources.update(
                     _attachment_source_variants(
@@ -785,7 +910,7 @@ class WikiExporter:
             if (
                 old_attachment is not None
                 and old_attachment_path is not None
-                and (staging / old_attachment_path).is_file()
+                and valid_resource(old_attachment)
                 and _attachment_metadata_matches(old_attachment, attachment)
             ):
                 _copy_managed_file(staging, old_attachment_path, attachment_path)
@@ -793,8 +918,16 @@ class WikiExporter:
                 attachment_entry.update(_attachment_metadata(attachment, attachment_path))
             else:
                 try:
-                    content, content_type = self.client.download_attachment(
-                        attachment.url, max_bytes=self.settings.max_attachment_bytes
+                    content, content_type = self._download_resource(
+                        attachment.url,
+                        name=attachment.name,
+                        expected_content_type=attachment.content_type,
+                        identity={
+                            "kind": "attachment",
+                            "space": space.id,
+                            "page": candidate.page_id,
+                            **_attachment_metadata(attachment, attachment_path),
+                        },
                     )
                 except GiteeWikiError as error:
                     remote_link = self.client.base_url.rstrip("/") + _attachment_url_path(
@@ -963,16 +1096,24 @@ class WikiExporter:
             if (
                 old_resource is not None
                 and old_resource_path is not None
-                and (staging / old_resource_path).is_file()
+                and valid_resource(old_resource)
             ):
                 _copy_managed_file(staging, old_resource_path, embedded_path)
                 resource_entry = copy.deepcopy(old_resource)
                 resource_entry["path"] = embedded_path.as_posix()
             else:
                 try:
-                    content, content_type = self.client.download_attachment(
+                    content, content_type = self._download_resource(
                         sources[0],
-                        max_bytes=self.settings.max_attachment_bytes,
+                        name=url_path,
+                        expected_content_type=None,
+                        identity={
+                            "kind": "embedded",
+                            "space": space.id,
+                            "page": candidate.page_id,
+                            "revision": revision,
+                            "urlPath": url_path,
+                        },
                     )
                 except GiteeWikiError as error:
                     embedded_resources_complete = False
@@ -1245,6 +1386,16 @@ def _attachment_source_variants(base_url: str, url: str) -> set[str]:
     } - {""}
 
 
+def _attachment_same_origin(url: str, base_url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        return (not parsed.scheme and not parsed.netloc) or (
+            _url_origin(urljoin(base_url + "/", url)) == _url_origin(base_url)
+        )
+    except ValueError:
+        return False
+
+
 def _attachment_url_path(url: str) -> str:
     relative = urlparse(url).path
     if not relative.startswith("/wiki-static/"):
@@ -1279,7 +1430,10 @@ def _rewrite_links(content: str, replacements: dict[str, str]) -> str:
 def _absolutize_confluence_redirects(content: str, base_url: str) -> str:
     replacements: dict[str, str] = {}
     for _start, _end, destination in _markdown_destination_spans(content):
-        parsed = urlparse(destination)
+        try:
+            parsed = urlparse(destination)
+        except ValueError:
+            continue
         if (
             not parsed.scheme
             and not parsed.netloc
@@ -1295,7 +1449,10 @@ def _wiki_static_destinations(
     grouped: dict[str, list[str]] = {}
     base_origin = _url_origin(base_url)
     for _start, _end, destination in _markdown_destination_spans(content):
-        parsed = urlparse(destination)
+        try:
+            parsed = urlparse(destination)
+        except ValueError:
+            continue
         if not parsed.path.startswith("/wiki-static/"):
             continue
         if (parsed.scheme or parsed.netloc) and _url_origin(destination) != base_origin:
@@ -1407,7 +1564,7 @@ def _markdown_line_destination_spans(line: str, offset: int) -> list[tuple[int, 
 
 def _relative_link(page_parent: Path, attachment_path: Path) -> str:
     start = page_parent.as_posix() if page_parent.as_posix() != "." else "."
-    return posixpath.relpath(attachment_path.as_posix(), start=start)
+    return quote(posixpath.relpath(attachment_path.as_posix(), start=start), safe="/")
 
 
 def _manifest_path(value: object) -> Path | None:
@@ -1417,6 +1574,29 @@ def _manifest_path(value: object) -> Path | None:
     if path.is_absolute() or ".." in path.parts:
         raise ExportError("manifest contains an unsafe managed path")
     return path
+
+
+def _valid_resource_file(path: Path, entry: dict[str, Any], max_bytes: int) -> bool:
+    try:
+        if not path.is_file() or path.stat().st_size > max_bytes:
+            return False
+        with path.open("rb") as stream:
+            content = stream.read(max_bytes + 1)
+        if (
+            len(content) > max_bytes
+            or len(content) != entry.get("size")
+            or hashlib.sha256(content).hexdigest() != entry.get("sha256")
+        ):
+            return False
+        validate_image_payload(
+            content,
+            name=str(entry.get("name") or entry.get("urlPath") or path),
+            content_type=entry.get("contentType"),
+            declared_content_type=entry.get("remoteContentType"),
+        )
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def _attachments_exist(staging: Path, value: object) -> bool:
@@ -1520,10 +1700,14 @@ def _attachment_metadata_matches(entry: dict[str, Any], attachment: Attachment) 
         entry_id = int(entry.get("id"))
     except (TypeError, ValueError):
         return False
+    try:
+        url_path = _attachment_url_path(attachment.url)
+    except ValueError:
+        return False
     return (
         entry_id == attachment.id
         and entry.get("name") == attachment.name
-        and entry.get("urlPath") == _attachment_url_path(attachment.url)
+        and entry.get("urlPath") == url_path
         and entry.get("remoteSize") == attachment.size
         and entry.get("remoteContentType") == attachment.content_type
         and entry.get("remoteUpdatedAt") == attachment.updated_at
@@ -1535,12 +1719,14 @@ def _attachments_match(
     staging: Path,
     old_attachments: object,
     current_attachments: tuple[Attachment, ...],
+    valid_resource: Callable[[dict[str, Any]], bool],
 ) -> bool:
     old_by_id = _attachment_entries_by_id(old_attachments)
     if len(old_by_id) != len(current_attachments):
         return False
     return all(
         (entry := old_by_id.get(attachment.id)) is not None
+        and valid_resource(entry)
         and _attachment_metadata_matches(entry, attachment)
         and (path := _manifest_path(entry.get("path"))) is not None
         and (staging / path).is_file()

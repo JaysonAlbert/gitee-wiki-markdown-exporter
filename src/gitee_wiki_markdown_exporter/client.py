@@ -9,6 +9,7 @@ from urllib.parse import quote, urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
 
+from gitee_wiki_markdown_exporter.image_payloads import InvalidImagePayload, validate_image_payload
 from gitee_wiki_markdown_exporter.models import (
     Attachment,
     DiagramComponent,
@@ -242,12 +243,19 @@ class GiteeWikiClient:
         """Download one attachment while enforcing host and size boundaries."""
         if max_bytes <= 0:
             raise ValueError("max_bytes must be positive")
-        path = url.lstrip("/")
-        if not urlparse(url).scheme and not path.startswith("wiki-static/"):
-            path = "wiki-static/" + path
-        target = urljoin(self.base_url + "/", url if urlparse(url).scheme else path)
-        if _origin(target) != _origin(self.base_url):
-            raise GiteeWikiError("attachment URL points outside the configured Gitee host")
+        try:
+            parsed = urlparse(url)
+            if parsed.scheme or parsed.netloc:
+                target = urljoin(self.base_url + "/", url)
+            else:
+                path = url.lstrip("/")
+                if not path.startswith("wiki-static/"):
+                    path = "wiki-static/" + path
+                target = urljoin(self.base_url + "/", path)
+            if _origin(target) != _origin(self.base_url):
+                raise GiteeWikiError("attachment URL points outside the configured Gitee host")
+        except ValueError as error:
+            raise GiteeWikiError("invalid_attachment_url: malformed URL") from error
         try:
             with self._client.stream("GET", target, headers=self._headers()) as response:
                 response.raise_for_status()
@@ -260,7 +268,13 @@ class GiteeWikiClient:
                             f"attachment_too_large: response exceeds {max_bytes} bytes"
                         )
                     chunks.append(chunk)
-                return b"".join(chunks), response.headers.get("content-type")
+                content = b"".join(chunks)
+                content_type = response.headers.get("content-type")
+                try:
+                    validate_image_payload(content, name=target, content_type=content_type)
+                except InvalidImagePayload as error:
+                    raise GiteeWikiError(str(error)) from error
+                return content, content_type
         except GiteeWikiError:
             raise
         except httpx.HTTPError as error:

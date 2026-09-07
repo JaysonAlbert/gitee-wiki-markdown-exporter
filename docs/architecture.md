@@ -107,6 +107,34 @@ checkpoint artifact cleanup; the empty lock file may remain because deleting a l
 unlocking can race with a new process. Cleanup failure must not reverse or report failure for an
 already committed mirror.
 
+## Resource recovery and validation
+
+Image downloads are checked against their byte signatures and basic container structure before
+being written. The same check applies when reusing manifest-managed image files, together with
+size and SHA-256 verification. A successful HTTP response or image MIME type alone is insufficient.
+This detects non-image responses and common truncation; it is not a full image decoder or an SVG
+sanitizer. Invalid images remain remote links and cause the existing partial result, so the next
+sync retries them. Response bodies and signed URL parameters are never included in diagnostics.
+
+Existing-mirror and selected-page runs keep a private sibling resource cache under the output
+lock. Only validated downloaded resources are retained after a failed or interrupted transaction.
+Retries start from the current live directory, poll remote metadata again, and reuse cache records
+only when their scope, resource identity, metadata, byte length and digest match. Embedded resource
+identity includes the page revision. This preserves local files created between attempts without
+restoring an old directory snapshot. First full exports retain their existing page checkpoint.
+The resource cache is removed best-effort after a successful swap; page bodies and diagram rendering
+may be repeated on existing-mirror retries. Metadata-invisible upstream byte changes remain outside
+the incremental contract.
+
+Local Markdown destinations are percent-encoded independently of filesystem names. Malformed
+external Markdown URLs are preserved as text and skipped by resource discovery, allowing valid
+resources on the same page to continue. Invalid listed resource URLs produce partial errors.
+The renderer version changes so existing pages receive corrected local destinations once.
+
+Optional `--progress` reports cumulative checked page, staged page and resource counts to stderr, throttled during
+work, with an explicit committed or failed terminal event. Counts before the committed event do
+not imply a change to the live mirror. `--json` stdout and existing exit codes remain unchanged.
+
 ## Compatibility policy
 
 The Project Wiki API is treated as a versioned external contract even though it is not part of the
