@@ -193,6 +193,18 @@ output prints a warning for each skipped attachment; `--json` includes the same 
 in `errors`. A partial export still exits `0` because the requested Markdown mirror was committed,
 while `status: "partial"` lets automation distinguish it from a complete `status: "ok"` run.
 
+### Watching long synchronizations
+
+Add `--progress` to `sync`, `spaces`, `pages`, or `pages-with-descendants` to see throttled progress
+on stderr: checked page metadata, staged pages, downloaded resources, and recovered resources.
+It can be combined with `--json`; stdout remains the final JSON result. Staged counts
+are provisional until the `committed` event. On interruption, repeat the same command: completed
+resource downloads can be reused, and the live mirror is only replaced after successful staging.
+
+Images are checked before download success and cache reuse. If a server returns a login page or
+another non-image body for an image, the result is partial and retains a remote link for retry.
+These checks identify signatures and basic container structure, not every possible decoding error.
+
 ## Compatibility
 
 The following observed endpoints are used:

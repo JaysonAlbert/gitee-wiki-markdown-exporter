@@ -110,3 +110,14 @@ class SyncResult:
             ],
             "errors": list(self.errors),
         }
+
+
+@dataclass(frozen=True)
+class ProgressEvent:
+    """Cumulative work counts; only the committed phase indicates a live mirror swap."""
+
+    phase: str
+    pages_staged: int
+    downloaded: int
+    recovered: int
+    pages_checked: int = 0

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated
 
@@ -17,7 +19,7 @@ from gitee_wiki_markdown_exporter.config import (
     safe_settings_dict,
 )
 from gitee_wiki_markdown_exporter.exporter import ExportError, WikiExporter
-from gitee_wiki_markdown_exporter.models import SyncResult
+from gitee_wiki_markdown_exporter.models import ProgressEvent, SyncResult
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -48,12 +50,16 @@ def pages(
     output_path: Annotated[Path | None, typer.Option("--output-path")] = None,
     config_path: Annotated[Path | None, typer.Option("--config-path")] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
+    progress: Annotated[
+        bool, typer.Option("--progress", help="Show staged progress on stderr")
+    ] = False,
 ) -> None:
     """Export selected pages."""
     _execute(
         config_path=config_path,
         output_path=output_path,
         json_output=json_output,
+        progress=progress,
         operation=lambda exporter, _settings: exporter.sync_pages(space, tuple(page_ids)),
     )
 
@@ -65,12 +71,16 @@ def pages_with_descendants(
     output_path: Annotated[Path | None, typer.Option("--output-path")] = None,
     config_path: Annotated[Path | None, typer.Option("--config-path")] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
+    progress: Annotated[
+        bool, typer.Option("--progress", help="Show staged progress on stderr")
+    ] = False,
 ) -> None:
     """Export selected page subtrees."""
     _execute(
         config_path=config_path,
         output_path=output_path,
         json_output=json_output,
+        progress=progress,
         operation=lambda exporter, _settings: exporter.sync_pages(
             space, tuple(page_ids), descendants=True
         ),
@@ -84,12 +94,16 @@ def spaces(
     config_path: Annotated[Path | None, typer.Option("--config-path")] = None,
     cleanup_stale: Annotated[bool, typer.Option("--cleanup-stale/--no-cleanup-stale")] = True,
     json_output: Annotated[bool, typer.Option("--json")] = False,
+    progress: Annotated[
+        bool, typer.Option("--progress", help="Show staged progress on stderr")
+    ] = False,
 ) -> None:
     """Export complete spaces."""
     _execute(
         config_path=config_path,
         output_path=output_path,
         json_output=json_output,
+        progress=progress,
         operation=lambda exporter, _settings: exporter.sync_spaces(
             tuple(space_keys), cleanup_stale=cleanup_stale
         ),
@@ -101,6 +115,9 @@ def sync(
     output_path: Annotated[Path | None, typer.Option("--output-path")] = None,
     config_path: Annotated[Path | None, typer.Option("--config-path")] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
+    progress: Annotated[
+        bool, typer.Option("--progress", help="Show staged progress on stderr")
+    ] = False,
 ) -> None:
     """Run the configured schedulable synchronization."""
 
@@ -113,6 +130,7 @@ def sync(
         config_path=config_path,
         output_path=output_path,
         json_output=json_output,
+        progress=progress,
         operation=operation,
     )
 
@@ -136,6 +154,7 @@ def _execute(
     config_path: Path | None,
     output_path: Path | None,
     json_output: bool,
+    progress: bool,
     operation: object,
 ) -> None:
     try:
@@ -148,7 +167,11 @@ def _execute(
             timeout=settings.connection.timeout,
             verify_ssl=settings.connection.verify_ssl,
         ) as client:
-            exporter = WikiExporter(client=client, settings=export_settings)
+            exporter = WikiExporter(
+                client=client,
+                settings=export_settings,
+                progress=_progress_writer() if progress else None,
+            )
             result = operation(exporter, settings)  # type: ignore[operator]
     except ConfigError as error:
         _fail(str(error), code=2)
@@ -166,6 +189,25 @@ def _execute(
         )
         for error in result.errors:
             typer.echo(f"warning: {error}", err=True)
+
+
+def _progress_writer() -> Callable[[ProgressEvent], None]:
+    last_report = 0.0
+
+    def report(event: ProgressEvent) -> None:
+        nonlocal last_report
+        now = time.monotonic()
+        if event.phase in {"checking", "staging"} and now - last_report < 5:
+            return
+        last_report = now
+        typer.echo(
+            f"progress: {event.phase}; pages checked={event.pages_checked}, "
+            f"pages staged={event.pages_staged}, "
+            f"resources downloaded={event.downloaded}, recovered={event.recovered}",
+            err=True,
+        )
+
+    return report
 
 
 def _fail(message: str, *, code: int) -> None:

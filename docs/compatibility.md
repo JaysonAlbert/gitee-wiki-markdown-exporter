@@ -49,6 +49,20 @@ successful SVG when available, marks the run partial, and retries during the nex
 The exporter accepts envelopes where `data` contains the resource. An explicit non-zero `code` or
 `success: false` is an error. HTTP errors are reported with method, sanitized URL, and status only.
 
+## Recovery behavior
+
+Image payload checks recognize PNG, JPEG, GIF, WebP, SVG, BMP, TIFF, ICO and common ISO image
+containers (AVIF/HEIF). An unrecognized body advertised or named as an image is skipped and reported
+as a resource error. Recognition checks signatures and basic structure, not full pixel decoding.
+Ordinary non-image attachments continue to be exported. Cached image files are checked before
+reuse; a failed check triggers a fresh download. No response body is recorded in the error.
+
+Existing mirrors and selected-page exports retain downloaded resources across interrupted runs,
+while re-reading remote metadata and the current live directory. The private sibling resource
+cache is not part of the mirror and may be removed to force fresh downloads. The next invocation
+must use the same output, provider, settings and selection to reuse it. First full-space checkpoint
+behavior is unchanged. Use `--progress` for stderr progress while keeping `--json` machine-readable.
+
 ## Reporting another contract
 
 Open an issue with:

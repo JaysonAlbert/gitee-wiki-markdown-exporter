@@ -93,3 +93,55 @@ def test_partial_export_reports_skipped_attachment_warning(tmp_path: Path, monke
     assert result.exit_code == 0
     assert "1 resources skipped" in result.stdout
     assert "warning: page 2 attachment 99 skipped: HTTP 500" in result.stderr
+
+
+def test_progress_goes_to_stderr_without_changing_json(tmp_path: Path, monkeypatch) -> None:
+    from gitee_wiki_markdown_exporter.models import ProgressEvent
+
+    config_path = tmp_path / "app_data.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "auth": {
+                    "gitee": {
+                        "url": "https://gitee.example.com",
+                        "tenant_id": "demo",
+                        "api_token": "test-token",
+                    }
+                },
+                "export": {"output_path": "mirror"},
+            }
+        )
+    )
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    class Exporter:
+        def __init__(self, *, progress, **kwargs):
+            self.progress = progress
+
+        def sync_pages(self, *args):
+            self.progress(ProgressEvent("started", 0, 0, 0))
+            for count in range(100):
+                self.progress(ProgressEvent("staging", count, count, 0))
+            self.progress(ProgressEvent("committed", 100, 100, 0))
+            return SyncResult(status="ok", output_path=tmp_path / "mirror", updated=100)
+
+    monkeypatch.setattr(cli_module, "GiteeWikiClient", Client)
+    monkeypatch.setattr(cli_module, "WikiExporter", Exporter)
+    result = runner.invoke(
+        app,
+        ["pages", "2", "--space", "ENG", "--json", "--progress", "--config-path", str(config_path)],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["status"] == "ok"
+    assert "committed" in result.stderr
+    assert len(result.stderr.splitlines()) == 2
