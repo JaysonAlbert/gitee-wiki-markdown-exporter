@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.4.0 - 2026-09-07
+
 - Resume interrupted first complete-space exports from validated page, attachment, and draw.io
   checkpoints without exposing an incomplete mirror as the live output.
 - Preserve observed task lists, status labels, information blocks, attachment macros, directories,
@@ -11,6 +13,14 @@ All notable changes to this project will be documented in this file.
 - Localize same-origin `/wiki-static/` resources omitted by attachment metadata, including
   checkpoint reuse, page moves, cleanup, and retryable partial failures.
 - Make legacy Gitee Confluence redirect links portable outside the Wiki application.
+- Validate image signatures and basic container structure before download success and cache reuse;
+  retry invalid images instead of caching HTML or other non-image responses as successful images.
+- Reuse validated resource downloads after interrupted existing-mirror and selected-page exports,
+  while rechecking remote metadata and preserving local files added between attempts.
+- Isolate malformed resource URLs, enforce origin checks before attachment cache reuse, and
+  percent-encode local Markdown destinations containing spaces or other reserved characters.
+- Add optional `--progress` output on stderr for metadata checks, staged pages, downloaded and
+  recovered resources, and committed or failed runs without changing JSON stdout.
 
 ## 0.3.0 - 2026-09-04
 
