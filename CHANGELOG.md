@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.5.0 - 2026-09-09
+
+- Preserve font colors, text background highlights, and literal status colors with validated
+  inline HTML; display explicit image titles as visible captions.
+- Convert same-origin, same-tenant page links to relative local links across exported spaces,
+  and repair incoming links when targets move or disappear without refetching referring bodies.
+- Add default-on page breadcrumbs with the `export.include_page_breadcrumbs` setting, and enrich
+  optional YAML front matter with source links, space names, and parent/ancestor context.
+- Retry transient API and download failures up to three times with bounded backoff and
+  `Retry-After` handling; restart interrupted downloads within existing origin and size limits.
+- Refresh existing mirrors for renderer version 7 and output-setting changes while reusing
+  unchanged attachments; preserve atomic output replacement and checkpoint recovery.
+- Keep inline and nested fenced-code examples unchanged during link conversion.
+
 ## 0.4.0 - 2026-09-07
 
 - Resume interrupted first complete-space exports from validated page, attachment, and draw.io
