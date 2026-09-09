@@ -57,6 +57,7 @@ class ExportSettings:
     diagram_path: str = "{page_parent_path}/{page_title}/diagram-{diagram_id}-{diagram_page}.svg"
     include_document_title: bool = True
     include_yaml_frontmatter: bool = False
+    include_page_breadcrumbs: bool = True
     skip_unchanged: bool = True
     cleanup_stale: bool = True
     lockfile_name: str = "gitee-wiki-lock.json"
@@ -153,6 +154,10 @@ def load_settings(path: Path | None = None) -> Settings:
                 export_data.get("include_yaml_frontmatter", False),
                 "export.include_yaml_frontmatter",
             ),
+            include_page_breadcrumbs=_boolean(
+                export_data.get("include_page_breadcrumbs", True),
+                "export.include_page_breadcrumbs",
+            ),
             skip_unchanged=_boolean(
                 export_data.get("skip_unchanged", True), "export.skip_unchanged"
             ),
@@ -200,6 +205,7 @@ def safe_settings_dict(settings: Settings) -> dict[str, object]:
             "diagram_path": settings.export.diagram_path,
             "include_document_title": settings.export.include_document_title,
             "include_yaml_frontmatter": settings.export.include_yaml_frontmatter,
+            "include_page_breadcrumbs": settings.export.include_page_breadcrumbs,
             "skip_unchanged": settings.export.skip_unchanged,
             "cleanup_stale": settings.export.cleanup_stale,
             "lockfile_name": settings.export.lockfile_name,

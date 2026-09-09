@@ -32,6 +32,24 @@ marks are serialized as one marked span, and code fences expand when their conte
 backticks. Unknown container nodes retain recognized descendants. Invalid or unrecognized
 top-level JSON remains plain text rather than being guessed at. Binary YDoc state is not supported.
 
+Observed `textStyle` marks carry `attrs.color` and `attrs.backgroundColor`; values include integer
+`rgb(r,g,b)` strings, hexadecimal colors, empty strings and null. Nonempty supported colors are
+preserved as inline `span` styles. Status nodes retain their title and a supported literal color;
+no Confluence-specific palette is assumed. Arbitrary CSS is discarded. Readers must allow inline
+HTML styles to display colors. A nonempty image `attrs.title` is also shown as a visible caption;
+alt text and filenames are not used to invent captions. The inspected page had empty image titles,
+so populated caption rendering is verified with synthetic data, not a live caption example.
+
+The observed human page route is `/wiki/{tenant}/space/{spaceKey}/doc/{pageId}`. Only same-origin,
+same-tenant links using that route are candidates for local page mapping. Query parameters are
+not needed for page identity; anchor fragments are retained. No Confluence redirect query is
+interpreted as a Gitee page ID.
+
+Transient read failures retry up to three times (four total attempts), including the read-only
+attachment-list POST. Backoff is 0.5/1/2 seconds unless a valid `Retry-After` requests a delay,
+capped at 30 seconds. Downloads restart with a new size-bounded buffer. Permanent HTTP errors,
+redirects, malformed payloads and image/size validation failures do not retry.
+
 Some rich-text image and link nodes reference `/wiki-static/` objects that the attachment-list
 endpoint does not return. The exporter discovers those remaining Markdown destinations, downloads
 same-origin objects through the same bounded attachment transport, records them as embedded

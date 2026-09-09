@@ -169,7 +169,11 @@ def test_first_sync_exports_tree_localizes_attachments_and_writes_manifest(tmp_p
 
     assert result.updated == 2
     runbook = output / "Engineering/Home/Runbook-2.md"
-    assert runbook.read_text(encoding="utf-8") == "# Runbook\n\n![diagram](Runbook/99.png)\n"
+    assert (
+        runbook.read_text(encoding="utf-8")
+        == "# Runbook\n\nEngineering / [Home](../Home-1.md) / Runbook\n\n"
+        "![diagram](Runbook/99.png)\n"
+    )
     assert (output / "Engineering/Home/Runbook/99.png").read_bytes() == png_bytes(
         "demo/2/diagram.png"
     )
@@ -562,7 +566,10 @@ def test_manifest_does_not_persist_attachment_query_credentials(tmp_path: Path) 
     assert attachment["urlPath"] == "/wiki-static/demo/2/diagram.png"
     assert "url" not in attachment
     document = (output / "Engineering/Home/Runbook-2.md").read_text(encoding="utf-8")
-    assert document == "# Runbook\n\n![diagram](Runbook/99.png)\n"
+    assert (
+        document == "# Runbook\n\nEngineering / [Home](../Home-1.md) / Runbook\n\n"
+        "![diagram](Runbook/99.png)\n"
+    )
     assert "signed-secret" not in document
 
 
@@ -583,7 +590,7 @@ def test_failed_attachment_is_reported_and_page_export_continues(tmp_path: Path)
         "GET https://gitee.example.com/wiki-static/failed failed: HTTP 500",
     )
     assert (output / "Engineering/Home/Runbook-2.md").read_text(encoding="utf-8") == (
-        "# Runbook\n\n![diagram](https://gitee.example.com/wiki-static/demo/2/diagram.png)\n"
+        "# Runbook\n\nEngineering / [Home](../Home-1.md) / Runbook\n\n![diagram](https://gitee.example.com/wiki-static/demo/2/diagram.png)\n"
     )
     assert not (output / "Engineering/Home/Runbook/99.png").exists()
     manifest = json.loads((output / "gitee-wiki-lock.json").read_text(encoding="utf-8"))
@@ -597,7 +604,7 @@ def test_failed_attachment_is_reported_and_page_export_continues(tmp_path: Path)
     assert client.download_reads == [failed_url]
     assert (output / "Engineering/Home/Runbook/99.png").read_bytes() == png_bytes(failed_url)
     assert (output / "Engineering/Home/Runbook-2.md").read_text(encoding="utf-8") == (
-        "# Runbook\n\n![diagram](Runbook/99.png)\n"
+        "# Runbook\n\nEngineering / [Home](../Home-1.md) / Runbook\n\n![diagram](Runbook/99.png)\n"
     )
 
 
@@ -654,7 +661,7 @@ def test_failed_unlisted_wiki_static_resource_stays_remote_and_is_retried(
     assert first.status == "partial"
     assert "embedded resource /wiki-static/demo/2/missing.png skipped" in first.errors[0]
     assert (output / "Engineering/Home/Runbook-2.md").read_text(encoding="utf-8") == (
-        "# Runbook\n\n![inline](https://gitee.example.com/wiki-static/demo/2/missing.png)\n"
+        "# Runbook\n\nEngineering / Home / Runbook\n\n![inline](https://gitee.example.com/wiki-static/demo/2/missing.png)\n"
     )
     entry = json.loads((output / "gitee-wiki-lock.json").read_text(encoding="utf-8"))["spaces"][
         "ENG"
@@ -682,7 +689,7 @@ def test_only_gitee_confluence_redirect_destinations_are_made_absolute(tmp_path:
     WikiExporter(client=client, settings=settings(output)).sync_pages("ENG", (2,))
 
     assert (output / "Engineering/Home/Runbook-2.md").read_text(encoding="utf-8") == (
-        "# Runbook\n\n"
+        "# Runbook\n\nEngineering / Home / Runbook\n\n"
         "[legacy](https://gitee.example.com/api/wiki/confluence/redirect?pageId=123)\n\n"
         "[example](/api/example/resource)\n\n"
         "`[code](/api/wiki/confluence/redirect?pageId=456)`\n"
@@ -854,7 +861,7 @@ def test_changed_attachment_redownloads_only_that_attachment(tmp_path: Path) -> 
 
     assert client.download_reads == ["demo/2/replaced.png"]
     assert (output / "Engineering/Home/Runbook-2.md").read_text(encoding="utf-8") == (
-        "# Runbook\n\n![diagram](Runbook/99.png)\n"
+        "# Runbook\n\nEngineering / [Home](../Home-1.md) / Runbook\n\n![diagram](Runbook/99.png)\n"
     )
 
 
@@ -902,7 +909,8 @@ def test_page_tree_move_reuses_content_and_rewrites_local_attachment_link(tmp_pa
     assert client.attachment_reads == [1, 2]
     moved_page = output / "Engineering/Guides/Operations-2.md"
     assert moved_page.read_text(encoding="utf-8") == (
-        "# Operations\n\n![diagram](Operations/99.png)\n"
+        "# Operations\n\nEngineering / [Guides](../Guides-1.md) / Operations\n\n"
+        "![diagram](Operations/99.png)\n"
     )
     assert (output / "Engineering/Guides/Operations/99.png").read_bytes() == png_bytes(
         "demo/2/diagram.png"
@@ -945,7 +953,7 @@ def test_known_page_id_can_export_when_root_tree_does_not_include_it(tmp_path: P
     assert result.updated == 1
     assert (tmp_path / "mirror/Engineering/Guides/Nested-4.md").read_text(
         encoding="utf-8"
-    ) == "# Nested\n\nDirect page\n"
+    ) == "# Nested\n\nEngineering / Guides / Nested\n\nDirect page\n"
 
 
 def test_complete_space_sync_removes_only_manifest_managed_stale_files(tmp_path: Path) -> None:

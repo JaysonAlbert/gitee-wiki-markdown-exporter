@@ -33,6 +33,12 @@ registry inspired by the official ProseMirror Markdown serializer, so Gitee-spec
 remain isolated from Markdown escaping and rendering state. Embedded draw.io diagrams are rendered
 locally to SVG and referenced from Markdown; the mirror does not retain editable `.drawio` files.
 
+Font colors, text background highlights and literal status colors are retained with inline HTML.
+For example, red text becomes `<span style="color: #ff0000;">Important note</span>`. Your Markdown
+reader must allow HTML styles to display these colors; readers that strip styles keep the text.
+Explicit image titles also appear as visible captions below their images. Empty titles and alt
+text do not generate captions.
+
 ## Installation
 
 Python 3.10 or newer is required. Pages containing draw.io diagrams also require a local Chrome,
@@ -79,6 +85,7 @@ Create `app_data.json` and point `GWME_CONFIG_PATH` at it:
     "diagram_path": "{page_parent_path}/{page_title}/diagram-{diagram_id}-{diagram_page}.svg",
     "include_document_title": true,
     "include_yaml_frontmatter": false,
+    "include_page_breadcrumbs": true,
     "skip_unchanged": true,
     "cleanup_stale": true,
     "lockfile_name": "gitee-wiki-lock.json",
@@ -93,6 +100,12 @@ Create `app_data.json` and point `GWME_CONFIG_PATH` at it:
 The token is read from the environment named by `api_token_env`. You may instead use
 `auth.gitee.api_token`, but an environment variable or secret manager is safer. Never commit the
 configuration file when it contains credentials.
+
+`include_page_breadcrumbs` defaults to `true`: child pages show their space, ancestors and current
+title. Available managed ancestors are linked locally; unavailable ancestors remain plain text.
+Set it to `false` for a mirror without breadcrumbs. Optional YAML front matter includes the
+existing page/revision IDs and title, plus the space name, parent ID, ancestor IDs/titles and a
+credential-free source-page URL. Author, date and label fields are not inferred from other values.
 
 Default configuration locations are platform-specific:
 
@@ -142,6 +155,17 @@ page ID, current revision, Markdown renderer version, local path, tree parent, d
 attachments and embedded resources, and diagrams. A renderer upgrade refreshes the affected page
 once even when its Gitee revision has not changed.
 
+Same-origin, same-tenant inline page links using `/wiki/{tenant}/space/{spaceKey}/doc/{pageId}`
+become relative links when their target is in the managed mirror. Labels and anchor fragments are
+retained. Missing targets keep a query-free remote URL. After a page moves or is removed, the
+exporter repairs incoming links in other managed pages, including unselected pages, without
+fetching those pages' bodies. Such local repairs count as updated pages. Inline-code and fenced-code
+examples and untracked files are left alone. Cross-space links resolve after all selections are staged.
+If page paths and rendered content are unchanged, the link pass skips re-reading the Markdown.
+
+Changes to title/front-matter/breadcrumb options or resource path templates also refresh affected
+selected pages while reusing unchanged attachment bytes.
+
 - unchanged revision, title, path, attachment metadata, and recorded diagram hashes: skip the page
   body and attachment bytes, and reuse existing SVG files;
 - changed revision or attachment metadata: refresh the Markdown page while reusing unchanged
@@ -182,6 +206,13 @@ size, content type, and upload timestamp). If a Gitee version replaces bytes wit
 of those fields, the change cannot be detected without forcing a full download.
 
 Only files recorded in the lockfile are eligible for cleanup.
+
+Read-only API requests and resource downloads retry transient network failures and HTTP
+408/429/500/502/503/504 up to three times, with 0.5/1/2-second backoff. A valid server `Retry-After`
+overrides that delay up to 30 seconds. Interrupted downloads restart from byte zero with the same
+size limit. Authentication failures, redirects, malformed responses and image/size validation
+failures do not retry. If retries are exhausted, existing failure and partial-export behavior
+applies.
 
 Complete-space incremental runs still expand the full lazy-loaded tree and poll the latest revision
 and attachment metadata for every selected page. Previously recorded diagrams add one component XML

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from email.utils import parsedate_to_datetime
+from typing import TypeVar
 from urllib.parse import quote, urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
@@ -18,6 +21,9 @@ from gitee_wiki_markdown_exporter.models import (
     Space,
     TreeNode,
 )
+
+_Result = TypeVar("_Result")
+_RETRY_STATUSES = {408, 429, 500, 502, 503, 504}
 
 
 class GiteeWikiError(RuntimeError):
@@ -256,29 +262,30 @@ class GiteeWikiClient:
                 raise GiteeWikiError("attachment URL points outside the configured Gitee host")
         except ValueError as error:
             raise GiteeWikiError("invalid_attachment_url: malformed URL") from error
-        try:
-            with self._client.stream("GET", target, headers=self._headers()) as response:
-                response.raise_for_status()
-                chunks: list[bytes] = []
-                size = 0
-                for chunk in response.iter_bytes():
-                    size += len(chunk)
-                    if size > max_bytes:
-                        raise GiteeWikiError(
-                            f"attachment_too_large: response exceeds {max_bytes} bytes"
-                        )
-                    chunks.append(chunk)
-                content = b"".join(chunks)
-                content_type = response.headers.get("content-type")
-                try:
-                    validate_image_payload(content, name=target, content_type=content_type)
-                except InvalidImagePayload as error:
-                    raise GiteeWikiError(str(error)) from error
-                return content, content_type
-        except GiteeWikiError:
-            raise
-        except httpx.HTTPError as error:
-            raise self._http_error("GET", target, error) from error
+        return self._read_with_retries(
+            lambda: self._download_once(target, max_bytes), method="GET", url=target
+        )
+
+    def _download_once(self, target: str, max_bytes: int) -> tuple[bytes, str | None]:
+        """Each attempt owns its response and starts a fresh bounded buffer."""
+        with self._client.stream("GET", target, headers=self._headers()) as response:
+            response.raise_for_status()
+            chunks: list[bytes] = []
+            size = 0
+            for chunk in response.iter_bytes():
+                size += len(chunk)
+                if size > max_bytes:
+                    raise GiteeWikiError(
+                        f"attachment_too_large: response exceeds {max_bytes} bytes"
+                    )
+                chunks.append(chunk)
+            content = b"".join(chunks)
+            content_type = response.headers.get("content-type")
+            try:
+                validate_image_payload(content, name=target, content_type=content_type)
+            except InvalidImagePayload as error:
+                raise GiteeWikiError(str(error)) from error
+            return content, content_type
 
     def _data(
         self,
@@ -290,7 +297,8 @@ class GiteeWikiClient:
         json_body: Mapping[str, object] | None = None,
     ) -> Mapping[str, object]:
         url = self.base_url + path
-        try:
+
+        def request() -> object:
             response = self._client.request(
                 method,
                 url,
@@ -298,9 +306,15 @@ class GiteeWikiClient:
                 json=json_body,
                 headers=self._headers(),
             )
-            response.raise_for_status()
-            payload = response.json()
-        except (httpx.HTTPError, json.JSONDecodeError) as error:
+            try:
+                response.raise_for_status()
+                return response.json()
+            finally:
+                response.close()
+
+        try:
+            payload = self._read_with_retries(request, method=method, url=url)
+        except json.JSONDecodeError as error:
             raise self._http_error(method, url, error) from error
         if not isinstance(payload, Mapping):
             raise GiteeWikiError(f"Wiki {label} response is not an object")
@@ -310,6 +324,27 @@ class GiteeWikiClient:
         if not isinstance(data, Mapping):
             raise GiteeWikiError(f"Wiki {label}.data is not an object")
         return data
+
+    def _read_with_retries(
+        self, operation: Callable[[], _Result], *, method: str, url: str
+    ) -> _Result:
+        for attempt in range(4):
+            try:
+                return operation()
+            except httpx.HTTPError as error:
+                transient = isinstance(
+                    error, (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
+                ) or (
+                    isinstance(error, httpx.HTTPStatusError)
+                    and error.response.status_code in _RETRY_STATUSES
+                )
+                if not transient or attempt == 3:
+                    raise self._http_error(method, url, error) from error
+                delay = 0.5 * 2**attempt
+                if isinstance(error, httpx.HTTPStatusError):
+                    delay = _retry_after(error.response.headers.get("retry-after"), delay)
+                time.sleep(delay)
+        raise AssertionError("retry loop exhausted without returning or raising")
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -401,3 +436,20 @@ def _safe_error_url(url: str) -> str:
     parsed = urlsplit(url)
     host = parsed.netloc.rsplit("@", 1)[-1]
     return urlunsplit((parsed.scheme, host, parsed.path, "", ""))
+
+
+def _retry_after(value: str | None, fallback: float) -> float:
+    if value is None:
+        return fallback
+    value = value.strip()
+    if value.isascii() and value.isdigit():
+        # Avoid converting an unbounded server-supplied integer.
+        digits = value.lstrip("0") or "0"
+        return 30.0 if len(digits) > 2 else min(float(digits), 30.0)
+    try:
+        timestamp = parsedate_to_datetime(value)
+        if timestamp.tzinfo is None:
+            return fallback
+        return min(max(timestamp.timestamp() - time.time(), 0.0), 30.0)
+    except (ValueError, TypeError, OverflowError):
+        return fallback

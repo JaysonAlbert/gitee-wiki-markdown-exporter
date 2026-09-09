@@ -4,6 +4,53 @@ import httpx
 from image_fixtures import png_bytes
 
 from gitee_wiki_markdown_exporter.client import GiteeWikiClient, GiteeWikiError
+from gitee_wiki_markdown_exporter.rich_text import render_wiki_content
+
+
+def test_revision_text_style_contract_renders_colors() -> None:
+    # Independently authored neutral content using the observed mark/attribute shape.
+    body = json.dumps(
+        {
+            "default": {
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Example note",
+                                "marks": [
+                                    {
+                                        "type": "textStyle",
+                                        "attrs": {
+                                            "color": "rgb(255,0,0)",
+                                            "backgroundColor": "#ffff00",
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        }
+    )
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/wiki/spaces/1/pages/2/history/3"
+        return httpx.Response(200, json={"data": {"id": 3, "contentType": "text", "content": body}})
+
+    client = GiteeWikiClient(
+        base_url="https://example.com",
+        tenant_id="example",
+        token="fake-token",
+        http_client=httpx.Client(transport=httpx.MockTransport(handle)),
+    )
+    assert render_wiki_content(client.get_revision(1, 2, 3).content) == (
+        '<span style="color: #ff0000; background-color: #ffff00;">Example note</span>'
+    )
 
 
 def test_client_uses_observed_paths_headers_and_envelopes() -> None:

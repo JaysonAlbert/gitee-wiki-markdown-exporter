@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import errno
 import hashlib
+import html
 import json
 import os
 import posixpath
@@ -15,7 +16,7 @@ import threading
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote, urljoin, urlparse
@@ -48,6 +49,12 @@ from gitee_wiki_markdown_exporter.models import (
     SyncResult,
     TreeNode,
 )
+from gitee_wiki_markdown_exporter.navigation import (
+    PageIdentity,
+    local_page_identity,
+    page_source_url,
+    remote_page_identity,
+)
 from gitee_wiki_markdown_exporter.paths import (
     render_attachment_path,
     render_diagram_path,
@@ -57,7 +64,7 @@ from gitee_wiki_markdown_exporter.paths import (
 from gitee_wiki_markdown_exporter.resource_cache import ResourceCache
 from gitee_wiki_markdown_exporter.rich_text import find_diagram_references, render_wiki_content
 
-_MARKDOWN_RENDERER_VERSION = 6
+_MARKDOWN_RENDERER_VERSION = 7
 _CHECKPOINT_SCHEMA_VERSION = 1
 _CHECKPOINT_PARTIAL = "_checkpointPartial"
 _OUTPUT_LOCK_GUARD = threading.Lock()
@@ -195,6 +202,7 @@ def _checkpoint_fingerprint(
             "diagramPath": settings.diagram_path,
             "includeDocumentTitle": settings.include_document_title,
             "includeYamlFrontmatter": settings.include_yaml_frontmatter,
+            "includePageBreadcrumbs": settings.include_page_breadcrumbs,
             "skipUnchanged": settings.skip_unchanged,
             "cleanupStale": settings.cleanup_stale,
             "lockfileName": settings.lockfile_name,
@@ -506,6 +514,7 @@ class WikiExporter:
             )
 
     def _sync_locked(self, selections: tuple[Selection, ...]) -> SyncResult:
+        self._rendered_pages: set[Path] = set()
         output = self.settings.output_path
         manifest_path = output / self.settings.lockfile_name
         previous = load_manifest(manifest_path)
@@ -554,6 +563,7 @@ class WikiExporter:
                 outcomes.extend(selection_outcomes)
                 deleted += selection_deleted
                 errors.extend(selection_errors)
+            outcomes = self._refresh_page_links(staging, previous, next_manifest, outcomes)
             _remove_checkpoint_fields(next_manifest)
             write_manifest(staging / self.settings.lockfile_name, next_manifest)
             _prune_empty_directories(staging)
@@ -585,6 +595,74 @@ class WikiExporter:
             pages=tuple(outcomes),
             errors=tuple(errors),
         )
+
+    def _refresh_page_links(
+        self,
+        staging: Path,
+        previous: dict[str, Any],
+        manifest: dict[str, Any],
+        outcomes: list[PageOutcome],
+    ) -> list[PageOutcome]:
+        """Resolve against the complete staged mirror, including unselected referring pages."""
+        tenant = str(getattr(self.client, "tenant_id", ""))
+        if not tenant:
+            return outcomes
+        pages = tuple(_manifest_pages(manifest))
+        old_paths = {identity: path for identity, _entry, path in _manifest_pages(previous)}
+        paths = {identity: path for identity, _entry, path in pages if (staging / path).is_file()}
+        old_reverse = {path: identity for identity, path in old_paths.items()}
+        current_reverse = {path: identity for identity, path in paths.items()}
+        index_unchanged = old_paths == paths
+        by_path = {outcome.path: index for index, outcome in enumerate(outcomes)}
+        for identity, entry, path in pages:
+            if identity not in paths:
+                continue
+            fresh = path in self._rendered_pages
+            if not fresh and index_unchanged and entry.get("navigationVersion") == 1:
+                continue
+            content = (staging / path).read_text(encoding="utf-8")
+            # Front matter may contain link-shaped title strings; it is metadata, not Markdown.
+            prefix_end = 0
+            if content.startswith("---\n"):
+                closing = content.find("\n---\n", 4)
+                if closing >= 0:
+                    prefix_end = closing + 5
+            prefix, body = content[:prefix_end], content[prefix_end:]
+            source = path if fresh else old_paths.get(identity, path)
+            reverse = current_reverse if fresh else old_reverse
+            replacements: dict[str, str] = {}
+            for _start, _end, destination in _markdown_destination_spans(body):
+                target = remote_page_identity(destination, self.client.base_url, tenant)
+                if target is None:
+                    target = local_page_identity(destination, source, reverse)
+                if target is None:
+                    continue
+                target_path = paths.get(target)
+                replacement = (
+                    _relative_link(path.parent, target_path)
+                    if target_path is not None
+                    else page_source_url(self.client.base_url, tenant, target)
+                )
+                if replacement is None:
+                    continue
+                fragment = urlparse(destination).fragment
+                if fragment:
+                    replacement += "#" + quote(fragment, safe="%/-._~")
+                replacements[destination] = replacement
+            document = prefix + _rewrite_markdown_destinations(body, replacements)
+            entry["navigationVersion"] = 1
+            if document == content:
+                continue
+            _atomic_write_text(staging / path, document)
+            index = by_path.get(path)
+            if index is None:
+                by_path[path] = len(outcomes)
+                outcomes.append(
+                    PageOutcome(identity[1], "updated", path, str(entry.get("revision", "")))
+                )
+            elif outcomes[index].status == "unchanged":
+                outcomes[index] = replace(outcomes[index], status="updated")
+        return outcomes
 
     def _download_resource(
         self,
@@ -678,6 +756,30 @@ class WikiExporter:
             next_pages = {}
             next_space["pages"] = next_pages
         next_spaces[space.key] = next_space
+        page_paths = {
+            int(page_key): path
+            for page_key, entry in previous_pages.items()
+            if str(page_key).isascii()
+            and str(page_key).isdigit()
+            and len(str(page_key)) <= 20
+            and isinstance(entry, dict)
+            and (path := _manifest_path(entry.get("path"))) is not None
+            and (staging / path).is_file()
+            and not (selection.complete_space and (selection.cleanup_stale or checkpoint_resumed))
+        }
+        page_paths.update(
+            {
+                candidate.page_id: render_page_path(
+                    self.settings.page_path,
+                    space_name=space.name,
+                    ancestors=candidate.ancestors,
+                    page_title=candidate.title,
+                    page_id=candidate.page_id,
+                )
+                for candidate in candidates
+            }
+        )
+        render_settings = _render_settings(self.settings, self.client)
         if checkpoint is not None:
             checkpoint.persist_space(space.key, next_space)
 
@@ -714,6 +816,11 @@ class WikiExporter:
                 page_title=candidate.title,
                 page_id=candidate.page_id,
             )
+            breadcrumbs = (
+                _render_breadcrumbs(space, candidate, desired_path, page_paths)
+                if self.settings.include_page_breadcrumbs
+                else ""
+            )
             status, entry, page_errors = self._sync_page(
                 staging=staging,
                 space=space,
@@ -722,6 +829,8 @@ class WikiExporter:
                 attachments=remote_state.attachments,
                 desired_path=desired_path,
                 old_entry=old_entry,
+                breadcrumbs=breadcrumbs,
+                render_settings=render_settings,
                 checkpoint_resumed=checkpoint_resumed,
                 save_progress=(
                     (
@@ -738,6 +847,8 @@ class WikiExporter:
                     else None
                 ),
             )
+            entry["renderSettings"] = render_settings
+            entry["breadcrumbHash"] = hashlib.sha256(breadcrumbs.encode("utf-8")).hexdigest()
             next_pages[page_key] = entry
             if checkpoint is not None:
                 checkpoint.persist_page(space.key, next_space, page_key, entry)
@@ -788,6 +899,8 @@ class WikiExporter:
         attachments: tuple[Attachment, ...],
         desired_path: Path,
         old_entry: dict[str, Any],
+        breadcrumbs: str,
+        render_settings: str,
         checkpoint_resumed: bool,
         save_progress: Callable[[dict[str, Any]], None] | None,
     ) -> tuple[str, dict[str, Any], list[str]]:
@@ -819,6 +932,9 @@ class WikiExporter:
             and old_entry.get(_CHECKPOINT_PARTIAL) is not True
             and old_revision == str(revision)
             and old_entry.get("rendererVersion") == _MARKDOWN_RENDERER_VERSION
+            and old_entry.get("renderSettings") == render_settings
+            and old_entry.get("breadcrumbHash")
+            == hashlib.sha256(breadcrumbs.encode("utf-8")).hexdigest()
             and old_entry.get("title") == candidate.title
             and old_path is not None
             and (staging / old_path).is_file()
@@ -1154,6 +1270,13 @@ class WikiExporter:
             revision=revision,
             include_title=self.settings.include_document_title,
             include_frontmatter=self.settings.include_yaml_frontmatter,
+            candidate=candidate,
+            source_url=page_source_url(
+                self.client.base_url,
+                str(getattr(self.client, "tenant_id", "")),
+                (space.key, candidate.page_id),
+            ),
+            breadcrumbs=breadcrumbs,
         )
         if old_path is not None and old_path != desired_path:
             _remove_path(staging, old_path)
@@ -1181,6 +1304,7 @@ class WikiExporter:
                 if old_resource_path and old_resource_path not in current_embedded_paths:
                     _remove_path(staging, old_resource_path)
         _atomic_write_text(staging / desired_path, document)
+        self._rendered_pages.add(desired_path)
         entry = _page_metadata(candidate, revision, desired_path)
         entry["attachments"] = attachment_entries
         entry["diagrams"] = diagram_entries
@@ -1334,6 +1458,8 @@ def _page_metadata(candidate: PageCandidate, revision: int, desired_path: Path) 
         "pageId": candidate.page_id,
         "title": candidate.title,
         "parentId": candidate.parent_id,
+        "ancestors": list(candidate.ancestors),
+        "ancestorIds": list(candidate.ancestor_ids),
         "revision": str(revision),
         "rendererVersion": _MARKDOWN_RENDERER_VERSION,
         "path": desired_path.as_posix(),
@@ -1349,22 +1475,88 @@ def _render_document(
     revision: int,
     include_title: bool,
     include_frontmatter: bool,
+    candidate: PageCandidate,
+    source_url: str | None,
+    breadcrumbs: str,
 ) -> str:
     pieces: list[str] = []
     if include_frontmatter:
+        source_metadata = (
+            f"gitee_source_url: {json.dumps(source_url, ensure_ascii=False)}\n"
+            if source_url
+            else ""
+        )
         pieces.append(
             "---\n"
             f"gitee_page_id: {page_id}\n"
             f"gitee_revision: {revision}\n"
             f"gitee_space: {json.dumps(space.key, ensure_ascii=False)}\n"
             f"title: {json.dumps(title, ensure_ascii=False)}\n"
+            f"gitee_space_name: {json.dumps(space.name, ensure_ascii=False)}\n"
+            f"gitee_parent_id: {json.dumps(candidate.parent_id, ensure_ascii=False)}\n"
+            f"gitee_ancestors: {json.dumps(candidate.ancestors, ensure_ascii=False)}\n"
+            f"gitee_ancestor_ids: {json.dumps(candidate.ancestor_ids)}\n"
+            f"{source_metadata}"
             "---"
         )
     stripped = body.lstrip()
     if include_title and not stripped.startswith(f"# {title}\n"):
         pieces.append(f"# {title}")
+    if breadcrumbs:
+        pieces.append(breadcrumbs)
     pieces.append(body.rstrip())
     return "\n\n".join(piece for piece in pieces if piece) + "\n"
+
+
+def _manifest_pages(
+    manifest: dict[str, Any],
+) -> Iterator[tuple[PageIdentity, dict[str, Any], Path]]:
+    for space_key, space in manifest.get("spaces", {}).items():
+        if not isinstance(space, dict) or not isinstance(space.get("pages"), dict):
+            continue
+        for page_key, entry in space["pages"].items():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                page_id = int(page_key)
+            except (ValueError, TypeError):
+                continue
+            path = _manifest_path(entry.get("path"))
+            if path is not None:
+                yield (space_key, page_id), entry, path
+
+
+def _render_settings(settings: ExportSettings, client: WikiReader) -> str:
+    values = {
+        "title": settings.include_document_title,
+        "frontmatter": settings.include_yaml_frontmatter,
+        "breadcrumbs": settings.include_page_breadcrumbs,
+        "attachments": settings.attachment_path,
+        "diagrams": settings.diagram_path,
+        "base": client.base_url,
+        "tenant": str(getattr(client, "tenant_id", "")),
+    }
+    return hashlib.sha256(json.dumps(values, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _render_breadcrumbs(
+    space: Space, candidate: PageCandidate, desired_path: Path, page_paths: dict[int, Path]
+) -> str:
+    if not candidate.ancestors:
+        return ""
+
+    def label(value: str) -> str:
+        value = value.replace("\r", " ").replace("\n", " ")
+        return re.sub(r"([\\`*_[\]<>|#!])", r"\\\1", html.escape(value, quote=False))
+
+    pieces = [label(space.name)]
+    for index, title in enumerate(candidate.ancestors):
+        page_id = candidate.ancestor_ids[index] if index < len(candidate.ancestor_ids) else None
+        path = page_paths.get(page_id) if page_id is not None else None
+        text = label(title)
+        pieces.append(f"[{text}]({_relative_link(desired_path.parent, path)})" if path else text)
+    pieces.append(label(candidate.title))
+    return " / ".join(pieces)
 
 
 def _attachment_source_variants(base_url: str, url: str) -> set[str]:
@@ -1493,7 +1685,9 @@ def _markdown_destination_spans(content: str) -> tuple[tuple[int, int, str], ...
     fence_character: str | None = None
     fence_length = 0
     for line in content.splitlines(keepends=True):
-        fence = re.match(r" {0,3}(`{3,}|~{3,})", line)
+        # Fences can be nested inside lists or blockquotes emitted by the rich-text renderer.
+        fence_line = re.sub(r"^(?:[ \t]*(?:>[ \t]?|(?:[-+*]|\d+[.)])[ \t]+))*", "", line)
+        fence = re.match(r"[ \t]*(`{3,}|~{3,})", fence_line)
         if fence is not None:
             marker = fence.group(1)
             if fence_character is None:

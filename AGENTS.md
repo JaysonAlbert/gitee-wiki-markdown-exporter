@@ -37,6 +37,8 @@ history.
   staging, and output replacement.
 - `diagram.py`: local browser discovery, draw.io rendering, network isolation, and SVG sanitizing.
 - `rich_text.py`: observed Gitee rich-text JSON to Markdown rendering with plain-text passthrough.
+- `navigation.py`: observed human page URL recognition and managed-path page identity lookup;
+  `exporter.py` owns when links are repaired within the staging transaction.
 - `paths.py`: filename normalization and cross-platform relative-path safety.
 - `manifest.py`: versioned lockfile loading and atomic writing.
 - `models.py`: typed values exchanged across boundaries.

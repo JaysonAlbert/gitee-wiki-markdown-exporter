@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import re
 from collections.abc import Callable, Mapping
@@ -153,11 +154,10 @@ class MarkdownSerializerState:
                 return f"{leading}{trailing}"
 
         unescaped_mark = next(((mark, spec) for mark, spec in mark_specs if not spec.escape), None)
-        rendered = (
-            _render_inline_code(text)
-            if unescaped_mark is not None and _mark_type(unescaped_mark[0]) == "code"
-            else self.escape(text, at_line_start)
-        )
+        inline_code = unescaped_mark is not None and _mark_type(unescaped_mark[0]) == "code"
+        if not inline_code and any(_mark_type(mark) == "textStyle" for mark, _ in mark_specs):
+            text = html.escape(text, quote=False)
+        rendered = _render_inline_code(text) if inline_code else self.escape(text, at_line_start)
 
         for mark, spec in mark_specs:
             mark_type = _mark_type(mark)
@@ -407,7 +407,12 @@ def _render_image(state: MarkdownSerializerState, node: RichTextNode) -> str:
     destination = _escape_link_destination(str(source))
     title = attrs.get("title")
     suffix = f' "{_escape_link_title(str(title))}"' if title else ""
-    return f"![{alt}]({destination}{suffix})"
+    caption = (
+        f"<br><em>{state.escape(html.escape(title, quote=False))}</em>"
+        if isinstance(title, str) and title.strip()
+        else ""
+    )
+    return f"![{alt}]({destination}{suffix}){caption}"
 
 
 def _render_diagram(state: MarkdownSerializerState, node: RichTextNode) -> str:
@@ -446,7 +451,11 @@ def _render_task_item(state: MarkdownSerializerState, node: RichTextNode) -> str
 
 def _render_status(state: MarkdownSerializerState, node: RichTextNode) -> str:
     title = _attrs(node).get("title")
-    return f"**{state.escape(str(title))}**" if title else ""
+    if not title:
+        return ""
+    color = _literal_color(_attrs(node).get("color"))
+    text = state.escape(html.escape(str(title), quote=False))
+    return f'<span style="color: {color};">**{text}**</span>' if color else f"**{text}**"
 
 
 def _render_info_block(state: MarkdownSerializerState, node: RichTextNode) -> str:
@@ -551,10 +560,57 @@ def _mark_type(mark: RichTextNode) -> str:
 
 
 def _valid_mark(mark_type: str, mark: RichTextNode) -> bool:
+    if mark_type == "textStyle":
+        return bool(_text_style(mark))
     if mark_type != "link":
         return True
     href = _attrs(mark).get("href")
     return isinstance(href, str) and bool(href)
+
+
+def _literal_color(value: object) -> str | None:
+    """Accept literal colors only; never interpolate remote CSS declarations."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip().lower()
+    if re.fullmatch(r"#[0-9a-f]{6}", value):
+        return value
+    if re.fullmatch(r"#[0-9a-f]{3}", value):
+        return "#" + "".join(character * 2 for character in value[1:])
+    match = re.fullmatch(r"rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)", value)
+    if match:
+        channels = tuple(int(channel) for channel in match.groups())
+        if all(channel <= 255 for channel in channels):
+            return "#" + "".join(f"{channel:02x}" for channel in channels)
+    # Standard CSS literal names, not a provider-specific status palette.
+    return {
+        "black": "#000000",
+        "silver": "#c0c0c0",
+        "gray": "#808080",
+        "white": "#ffffff",
+        "maroon": "#800000",
+        "red": "#ff0000",
+        "purple": "#800080",
+        "fuchsia": "#ff00ff",
+        "green": "#008000",
+        "lime": "#00ff00",
+        "olive": "#808000",
+        "yellow": "#ffff00",
+        "navy": "#000080",
+        "blue": "#0000ff",
+        "teal": "#008080",
+        "aqua": "#00ffff",
+    }.get(value)
+
+
+def _text_style(mark: RichTextNode) -> str:
+    attrs = _attrs(mark)
+    styles: list[str] = []
+    for attribute, property_name in (("color", "color"), ("backgroundColor", "background-color")):
+        color = _literal_color(attrs.get(attribute))
+        if color:
+            styles.append(f"{property_name}: {color};")
+    return " ".join(styles)
 
 
 def _plain_text(nodes: list[RichTextNode]) -> str:
@@ -674,6 +730,7 @@ GITEE_NODE_SERIALIZERS: dict[str, NodeRenderer] = {
 }
 
 GITEE_MARK_SERIALIZERS = {
+    "textStyle": MarkSerializerSpec(lambda mark: f'<span style="{_text_style(mark)}">', "</span>"),
     "code": MarkSerializerSpec("", "", escape=False),
     "em": MarkSerializerSpec("_", "_", expel_enclosing_whitespace=True),
     "link": MarkSerializerSpec("[", _link_close),
