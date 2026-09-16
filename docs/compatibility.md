@@ -105,3 +105,6 @@ Open an issue with:
    URLs removed.
 
 Never publish a production token or an unsanitized response payload.
+
+Reference classification shares the renderer's formatting-mark aliases (`bold`, `italic`,
+`strikethrough`) and image/media `src`/`url` forms; styling alone does not hide attachment usage.

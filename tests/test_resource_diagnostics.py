@@ -149,3 +149,32 @@ def test_legacy_manifest_refreshes_reference_state_once(tmp_path):
     client.revision_reads.clear()
     exporter.sync_pages("ENG", (2,))
     assert client.revision_reads == []
+
+
+@pytest.mark.parametrize("mark", ["bold", "italic", "strikethrough"])
+def test_style_aliases_do_not_make_absent_resource_usage_unknown(tmp_path, mark):
+    client = FakeWikiClient()
+    client.bodies[2] = rich(
+        {
+            "type": "paragraph",
+            "content": [{"type": "text", "text": "plain styled text", "marks": [{"type": mark}]}],
+        }
+    )
+    client.fail_attachment_urls.add("demo/2/diagram.png")
+    exporter = WikiExporter(client=client, settings=ExportSettings(output_path=tmp_path / "mirror"))
+    payload = exporter.sync_pages("ENG", (2,)).to_dict()
+    assert payload["resourceIssues"][0]["reference"] == "unreferenced"
+    assert payload["contentStatus"] == "complete"
+
+
+@pytest.mark.parametrize(
+    "kind, attribute", [("media", "src"), ("mediaSingle", "url"), ("image", "url")]
+)
+def test_all_supported_media_nodes_count_as_references(tmp_path, kind, attribute):
+    client = FakeWikiClient()
+    client.bodies[2] = rich({"type": kind, "attrs": {attribute: "/wiki-static/demo/2/diagram.png"}})
+    client.fail_attachment_urls.add("demo/2/diagram.png")
+    exporter = WikiExporter(client=client, settings=ExportSettings(output_path=tmp_path / "mirror"))
+    payload = exporter.sync_pages("ENG", (2,)).to_dict()
+    assert payload["resourceIssues"][0]["reference"] == "referenced"
+    assert payload["contentStatus"] == "partial"

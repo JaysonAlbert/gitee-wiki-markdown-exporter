@@ -10,6 +10,7 @@ from gitee_wiki_markdown_exporter.models import Attachment
 from gitee_wiki_markdown_exporter.rich_text import (
     GITEE_MARKDOWN_SERIALIZER,
     _attachment_ids,
+    _mark_type,
     _rich_text_document,
 )
 
@@ -41,9 +42,10 @@ def classify_attachment_references(
         if not isinstance(attrs, dict):
             unknown = True
             attrs = {}
-        if kind == "image":
-            if isinstance(attrs.get("src"), str):
-                urls.append(attrs["src"])
+        if kind in ("image", "media", "mediaSingle"):
+            source = attrs.get("src") or attrs.get("url")
+            if isinstance(source, str):
+                urls.append(source)
             else:
                 unknown = True
         elif kind == "attachments":
@@ -57,7 +59,7 @@ def classify_attachment_references(
             if not isinstance(mark, dict):
                 unknown = True
                 continue
-            mark_type = mark.get("type")
+            mark_type = _mark_type(mark)
             if not isinstance(mark_type, str) or mark_type not in GITEE_MARKDOWN_SERIALIZER.marks:
                 unknown = True
             if mark_type == "link":
