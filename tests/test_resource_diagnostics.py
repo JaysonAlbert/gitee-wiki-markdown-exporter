@@ -20,6 +20,7 @@ def rich(*nodes):
         ("![a](/wiki-static/demo/2/diagram.png)", "referenced", "partial"),
         ("[a](demo/2/diagram.png)", "referenced", "partial"),
         ("[a](/demo/2/diagram.png)", "referenced", "partial"),
+        ("[a](/wiki-static/demo/1/../2/diagram.png)", "referenced", "partial"),
         ("No inline resources", "unreferenced", "complete"),
         (rich({"type": "futureWidget", "attrs": {"resource": 99}}), "unknown", "unknown"),
         (

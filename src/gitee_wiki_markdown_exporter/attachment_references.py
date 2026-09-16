@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import posixpath
 import re
 from urllib.parse import unquote, urlsplit
 
@@ -121,6 +122,6 @@ def _resource_path(url: str, base_url: str, *, listed: bool = False) -> str | No
             path = "/" + path.lstrip("/")
             if not path.startswith("/wiki-static/"):
                 path = "/wiki-static" + path
-        return path
+        return posixpath.normpath(path)
     except ValueError:
         return None

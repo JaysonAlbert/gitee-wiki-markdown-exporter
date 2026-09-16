@@ -106,5 +106,6 @@ Open an issue with:
 
 Never publish a production token or an unsanitized response payload.
 
+Reference comparison normalizes URL encoding and path dot-segments on the configured origin.
 Reference classification shares the renderer's formatting-mark aliases (`bold`, `italic`,
 `strikethrough`) and image/media `src`/`url` forms; styling alone does not hide attachment usage.
