@@ -23,6 +23,11 @@ from urllib.parse import quote, urljoin, urlparse
 from uuid import uuid4
 
 from gitee_wiki_markdown_exporter import __version__
+from gitee_wiki_markdown_exporter.attachment_references import (
+    REFERENCE_STATES,
+    REFERENCE_VERSION,
+    classify_attachment_references,
+)
 from gitee_wiki_markdown_exporter.client import GiteeWikiError
 from gitee_wiki_markdown_exporter.config import ExportSettings
 from gitee_wiki_markdown_exporter.diagram import (
@@ -62,6 +67,7 @@ from gitee_wiki_markdown_exporter.paths import (
     render_page_path,
 )
 from gitee_wiki_markdown_exporter.resource_cache import ResourceCache
+from gitee_wiki_markdown_exporter.resource_issues import ResourceIssue, resource_issue
 from gitee_wiki_markdown_exporter.rich_text import find_diagram_references, render_wiki_content
 
 _MARKDOWN_RENDERER_VERSION = 7
@@ -515,6 +521,8 @@ class WikiExporter:
 
     def _sync_locked(self, selections: tuple[Selection, ...]) -> SyncResult:
         self._rendered_pages: set[Path] = set()
+        self._resource_issues: list[ResourceIssue] = []
+        self._reference_counts = dict.fromkeys(REFERENCE_STATES, 0)
         output = self.settings.output_path
         manifest_path = output / self.settings.lockfile_name
         previous = load_manifest(manifest_path)
@@ -594,6 +602,8 @@ class WikiExporter:
             deleted=deleted,
             pages=tuple(outcomes),
             errors=tuple(errors),
+            resource_issues=tuple(self._resource_issues),
+            attachment_reference_counts=self._reference_counts.copy(),
         )
 
     def _refresh_page_links(
@@ -847,6 +857,9 @@ class WikiExporter:
                     else None
                 ),
             )
+            for reference in entry.get("attachmentReferences", {}).values():
+                if reference in self._reference_counts:
+                    self._reference_counts[reference] += 1
             entry["renderSettings"] = render_settings
             entry["breadcrumbHash"] = hashlib.sha256(breadcrumbs.encode("utf-8")).hexdigest()
             next_pages[page_key] = entry
@@ -930,6 +943,10 @@ class WikiExporter:
         base_unchanged = (
             (self.settings.skip_unchanged or checkpoint_resumed)
             and old_entry.get(_CHECKPOINT_PARTIAL) is not True
+            and old_entry.get("attachmentReferenceVersion") == REFERENCE_VERSION
+            and isinstance(old_entry.get("attachmentReferences"), dict)
+            and set(old_entry["attachmentReferences"]) == {str(a.id) for a in attachments}
+            and all(v in REFERENCE_STATES for v in old_entry["attachmentReferences"].values())
             and old_revision == str(revision)
             and old_entry.get("rendererVersion") == _MARKDOWN_RENDERER_VERSION
             and old_entry.get("renderSettings") == render_settings
@@ -978,9 +995,17 @@ class WikiExporter:
                 old_diagrams=old_diagrams,
                 old_embedded_resources=old_embedded_resources,
             )
+            entry["attachmentReferences"] = copy.deepcopy(old_entry["attachmentReferences"])
+            entry["attachmentReferenceVersion"] = REFERENCE_VERSION
             return "moved", entry, []
 
         page = self.client.get_revision(space.id, candidate.page_id, revision)
+        references = classify_attachment_references(
+            page.content,
+            attachments,
+            self.client.base_url,
+            tuple(url for _, _, url in _markdown_destination_spans(page.content)),
+        )
         attachment_entries: list[dict[str, object]] = []
         diagram_entries: list[dict[str, object]] = []
         embedded_resource_entries: list[dict[str, object]] = []
@@ -1003,6 +1028,15 @@ class WikiExporter:
                 )
                 errors.append(
                     f"page {candidate.page_id} attachment {attachment.id} skipped: {reason}"
+                )
+                self._resource_issues.append(
+                    resource_issue(
+                        reason,
+                        page_id=candidate.page_id,
+                        resource_kind="attachment",
+                        resource_id=attachment.id,
+                        reference=references[str(attachment.id)],
+                    )
                 )
                 continue
             listed_attachment_url_paths.add(url_path)
@@ -1053,6 +1087,16 @@ class WikiExporter:
                         replacements[source] = remote_link
                     errors.append(
                         f"page {candidate.page_id} attachment {attachment.id} skipped: {error}"
+                    )
+                    self._resource_issues.append(
+                        resource_issue(
+                            error,
+                            page_id=candidate.page_id,
+                            resource_kind="attachment",
+                            resource_id=attachment.id,
+                            reference=references[str(attachment.id)],
+                            limit_bytes=self.settings.max_attachment_bytes,
+                        )
                     )
                     attachment_links[attachment.id] = (attachment.name, remote_link)
                     continue
@@ -1149,6 +1193,15 @@ class WikiExporter:
             except (GiteeWikiError, DiagramRenderError) as error:
                 diagrams_complete = False
                 errors.append(f"page {candidate.page_id} diagram {component_id} skipped: {error}")
+                self._resource_issues.append(
+                    resource_issue(
+                        error,
+                        page_id=candidate.page_id,
+                        resource_kind="diagram",
+                        resource_id=component_id,
+                        reference="referenced",
+                    )
+                )
                 old_diagram = old_diagrams_by_id.get(component_id)
                 old_paths = _diagram_paths(old_diagram)
                 if (
@@ -1238,6 +1291,16 @@ class WikiExporter:
                     errors.append(
                         f"page {candidate.page_id} embedded resource {url_path} skipped: {error}"
                     )
+                    self._resource_issues.append(
+                        resource_issue(
+                            error,
+                            page_id=candidate.page_id,
+                            resource_kind="embedded",
+                            resource_key=hashlib.sha256(url_path.encode()).hexdigest(),
+                            reference="referenced",
+                            limit_bytes=self.settings.max_attachment_bytes,
+                        )
+                    )
                     continue
                 _atomic_write_bytes(staging / embedded_path, content)
                 resource_entry = {
@@ -1307,6 +1370,8 @@ class WikiExporter:
         self._rendered_pages.add(desired_path)
         entry = _page_metadata(candidate, revision, desired_path)
         entry["attachments"] = attachment_entries
+        entry["attachmentReferences"] = references
+        entry["attachmentReferenceVersion"] = REFERENCE_VERSION
         entry["diagrams"] = diagram_entries
         entry["diagramsComplete"] = diagrams_complete
         entry["embeddedResources"] = embedded_resource_entries

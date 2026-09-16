@@ -135,6 +135,20 @@ Optional `--progress` reports cumulative checked page, staged page and resource 
 work, with an explicit committed or failed terminal event. Counts before the committed event do
 not imply a change to the live mirror. `--json` stdout and existing exit codes remain unchanged.
 
+## Reference-aware diagnostics
+
+Reference analysis owns current-revision attachment usage independently of download success.
+The manifest retains versioned `attachmentReferences` for every listed attachment, including
+failed downloads. Existing manifests are refreshed once; unchanged pages reuse classifications
+only with matching revision, metadata and reference-analysis version. Whole-list archival,
+transactional staging and managed cleanup are unchanged. Unknown schemas conservatively retain
+unknown references. Structured issues are accumulated for this selection only; incoming-link
+repairs on other pages do not count as fresh remote validation.
+
+Image validation distinguishes invalid content from container compatibility. Safe standard SVG
+DOCTYPE declarations are stripped for parsing with no DTD fetching; ENTITY and custom declarations
+remain rejected. JPEG segment boundaries distinguish an actual end marker from bytes in metadata.
+
 ## Compatibility policy
 
 The Project Wiki API is treated as a versioned external contract even though it is not part of the

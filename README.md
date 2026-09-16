@@ -236,6 +236,31 @@ Images are checked before download success and cache reuse. If a server returns 
 another non-image body for an image, the result is partial and retains a remote link for retry.
 These checks identify signatures and basic container structure, not every possible decoding error.
 
+### Resource references and diagnostics
+
+Attachment listing means page ownership, not current-body usage. All listed attachments continue
+to be archived. Each attachment is classified as `referenced`, `unreferenced`, or `unknown` from
+the current revision: image/link URLs and selected attachment-list IDs establish references;
+an attachment-list component without a selection displays all attachments. Unknown components or
+unsupported body syntax cannot establish absence. Image node IDs are not attachment IDs.
+These states do not describe references from other pages or historical revisions and never
+justify deleting an attachment.
+
+JSON results retain `status`, `errors`, and exit codes and add `resourceIssues`,
+`attachmentReferenceCounts`, and `contentStatus`. Each issue includes a page ID, resource kind,
+reference state, safe reason code, retryability and, where available, a numeric resource ID or
+an opaque resource key, HTTP status and byte limit. No response bodies, titles, credentials or
+signed URLs are included. `contentStatus` describes resource completeness for selected current
+pages: `partial` when a referenced resource failed, `unknown` when failed resources have uncertain
+references, otherwise `complete`. A run can therefore have complete current content resources but
+partial attachment archival. Legacy `status: partial` still reports every archival failure.
+
+Transient HTTP/network failures already receive bounded transport retries; HTML responses,
+file-type mismatches, malformed images, unsafe SVG declarations and size limits need distinct
+operator actions. JPEG container validation accepts trailing data after a real end marker;
+standard SVG 1.0/1.1 public declarations are accepted without fetching DTDs or expanding entities.
+Actual truncated images, non-image bodies and entity declarations remain rejected.
+
 ## Compatibility
 
 The following observed endpoints are used:

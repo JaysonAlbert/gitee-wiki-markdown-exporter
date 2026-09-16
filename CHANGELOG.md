@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.6.0 - 2026-09-16
+
+- Classify listed attachments as referenced, unreferenced, or unknown using the current page
+  body, including media nodes, attachment components, supported formatting aliases, and
+  normalized same-origin URLs; persist versioned reference states for incremental reuse.
+- Add credential-free resource failure codes, reference counts, and current-content status to
+  JSON results while preserving existing status, errors, exit codes, and full attachment archival.
+- Accept valid JPEG containers with trailing data and standard SVG public declarations without
+  fetching external DTDs; continue rejecting truncated images and unsafe entity declarations.
+- Distinguish HTML responses, non-image document payloads, damaged image containers, HTTP and
+  network failures, size limits, and unsafe SVGs for actionable downstream diagnostics.
+
 ## 0.5.0 - 2026-09-09
 
 - Preserve font colors, text background highlights, and literal status colors with validated
