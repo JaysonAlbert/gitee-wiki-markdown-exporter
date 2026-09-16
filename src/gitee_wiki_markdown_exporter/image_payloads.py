@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import struct
 import zlib
 from pathlib import PurePosixPath
@@ -50,16 +51,14 @@ def validate_image_payload(
     if suffix not in _IMAGE_SUFFIXES and not image_type:
         return
     if not _is_image(content):
-        raise InvalidImagePayload(
-            "invalid_image_payload: unrecognized or truncated image container"
-        )
+        raise InvalidImagePayload(f"invalid_image_payload: {_failure_reason(content)}")
 
 
 def _is_image(data: bytes) -> bool:
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return _is_png(data)
     if data.startswith(b"\xff\xd8\xff"):
-        return len(data) >= 12 and data.endswith(b"\xff\xd9")
+        return _is_jpeg(data)
     if data[:6] in (b"GIF87a", b"GIF89a"):
         return len(data) >= 14 and all(struct.unpack("<HH", data[6:10])) and data.endswith(b";")
     if data.startswith(b"RIFF"):
@@ -82,14 +81,100 @@ def _is_image(data: bytes) -> bool:
             data[i : i + 4] in (b"avif", b"avis", b"heic", b"heix", b"mif1")
             for i in range(8, size, 4)
         )
-    # Parse the root, rather than rejecting SVG foreignObject content containing HTML.
-    if b"<!DOCTYPE" in data.upper() or b"<!ENTITY" in data.upper():
-        return False
     try:
-        root = ElementTree.fromstring(data)
+        root = ElementTree.fromstring(_safe_svg(data))
         return root.tag in ("svg", "{http://www.w3.org/2000/svg}svg")
     except (ElementTree.ParseError, ValueError):
         return False
+
+
+_STANDARD_SVG_DTD = re.compile(
+    rb"<!DOCTYPE\s+svg\s+PUBLIC\s+([\"'])-//W3C//DTD SVG "
+    rb"(1\.[01])//EN\1\s+([\"'])https?://www\.w3\.org/"
+    rb"(?:Graphics/SVG/1\.1/DTD/svg11\.dtd|TR/2001/REC-SVG-20010904/DTD/svg10\.dtd)\3\s*>",
+)
+
+
+def _safe_svg(data: bytes) -> bytes:
+    # Restrict declarations before XML parsing, including UTF-16/32 encodings.
+    # Standard public declarations are stripped, never fetched or resolved.
+    if b"\x00" in data or b"<!ENTITY" in data.upper():
+        raise ValueError("unsafe_svg")
+    if b"<!DOCTYPE" in data.upper():
+        cleaned, count = _STANDARD_SVG_DTD.subn(b"", data)
+        if count != 1 or b"<!DOCTYPE" in cleaned.upper():
+            raise ValueError("unsafe_svg")
+        return cleaned
+    return data
+
+
+def _failure_reason(data: bytes) -> str:
+    prefix = data.lstrip()[:512].lower()
+    if prefix.startswith((b"<!doctype html", b"<html")):
+        return "html_response"
+    if (
+        b"<!DOCTYPE" in data.upper()
+        or b"<!ENTITY" in data.upper()
+        or (b"\x00" in data and data.startswith((b"\xff\xfe", b"\xfe\xff", b"\x00\x00\xfe\xff")))
+    ):
+        try:
+            _safe_svg(data)
+        except ValueError:
+            return "unsafe_svg"
+    if data.startswith((b"PK\x03\x04", b"%PDF-", b"\xd0\xcf\x11\xe0")):
+        return "image_type_mismatch"
+    return "invalid_image_container"
+
+
+def _is_jpeg(data: bytes) -> bool:
+    """Walk marker lengths and scans; tolerate bytes after a genuine EOI marker."""
+    offset = 2
+    frame = False
+    scan = False
+    in_scan = False
+    while offset < len(data):
+        if in_scan:
+            marker_start = data.find(b"\xff", offset)
+            if marker_start < 0:
+                return False
+            offset = marker_start
+        elif data[offset] != 0xFF:
+            return False
+        while offset < len(data) and data[offset] == 0xFF:
+            offset += 1
+        if offset >= len(data):
+            return False
+        marker = data[offset]
+        offset += 1
+        if in_scan and (marker == 0 or 0xD0 <= marker <= 0xD7):
+            continue
+        in_scan = False
+        if marker == 0xD9:
+            return frame and scan
+        if marker in (0, 0xD8) or 0xD0 <= marker <= 0xD7:
+            return False
+        if marker == 1:
+            continue
+        if offset + 2 > len(data):
+            return False
+        size = int.from_bytes(data[offset : offset + 2], "big")
+        end = offset + size
+        if size < 2 or end > len(data):
+            return False
+        if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+            if size < 8 or not all(struct.unpack(">HH", data[offset + 3 : offset + 7])):
+                return False
+            components = data[offset + 7]
+            if not components or size != 8 + 3 * components:
+                return False
+            frame = True
+        if marker == 0xDA:
+            if not frame or size < 6 or size != 6 + 2 * data[offset + 2]:
+                return False
+            scan = True
+            in_scan = True
+        offset = end
+    return False
 
 
 def _is_png(data: bytes) -> bool:

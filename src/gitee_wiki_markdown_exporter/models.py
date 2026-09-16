@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from gitee_wiki_markdown_exporter.resource_issues import ResourceIssue
+
 
 @dataclass(frozen=True)
 class Space:
@@ -89,6 +91,19 @@ class SyncResult:
     pages: tuple[PageOutcome, ...] = ()
     errors: tuple[str, ...] = field(default_factory=tuple)
 
+    resource_issues: tuple[ResourceIssue, ...] = ()
+    attachment_reference_counts: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def content_status(self) -> str:
+        if any(issue.reference == "referenced" for issue in self.resource_issues):
+            return "partial"
+        if len(self.errors) != len(self.resource_issues) or any(
+            issue.reference == "unknown" for issue in self.resource_issues
+        ):
+            return "unknown"
+        return "complete"
+
     def to_dict(self) -> dict[str, object]:
         """Render a JSON-safe summary."""
         return {
@@ -109,6 +124,9 @@ class SyncResult:
                 for page in self.pages
             ],
             "errors": list(self.errors),
+            "resourceIssues": [issue.to_dict() for issue in self.resource_issues],
+            "contentStatus": self.content_status,
+            "attachmentReferenceCounts": dict(self.attachment_reference_counts),
         }
 
 

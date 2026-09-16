@@ -81,6 +81,19 @@ cache is not part of the mirror and may be removed to force fresh downloads. The
 must use the same output, provider, settings and selection to reuse it. First full-space checkpoint
 behavior is unchanged. Use `--progress` for stderr progress while keeping `--json` machine-readable.
 
+## Attachment reference contract
+
+The observed attachment list has no usage flag. `rawId` identifies the owning page. Rich-text
+image `attrs.src` and link mark `attrs.href` use resource URLs; image `attrs.id` is an editor-node
+identity, not an attachment ID. The `attachments` node uses `attachment-checked-list` (a list or
+comma-separated IDs); an empty selection follows existing rendering and lists all attachments.
+Supported Markdown destinations are also matched after URL normalization. Unknown nodes, marks,
+malformed JSON and unsupported Markdown reference syntax produce unknown absence rather than
+unreferenced. Synthetic tests exercise these shapes without retaining private payloads.
+
+The v1 result schema gains additive `resourceIssues`, `attachmentReferenceCounts` and
+`contentStatus` fields. Existing `errors`, overall status and exit semantics are preserved.
+
 ## Reporting another contract
 
 Open an issue with:
