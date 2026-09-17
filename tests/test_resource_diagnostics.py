@@ -60,7 +60,10 @@ def test_failed_attachment_reports_current_content_impact(
     client = FakeWikiClient()
     client.bodies[2] = body
     client.fail_attachment_urls.add("demo/2/diagram.png")
-    exporter = WikiExporter(client=client, settings=ExportSettings(output_path=tmp_path / "mirror"))
+    exporter = WikiExporter(
+        client=client,
+        settings=ExportSettings(output_path=tmp_path / "mirror", only_referenced_images=False),
+    )
     result = exporter.sync_pages("ENG", (2,))
     payload = result.to_dict()
     assert result.status == "partial"  # Archival still attempts even unused attachments.
@@ -162,7 +165,10 @@ def test_style_aliases_do_not_make_absent_resource_usage_unknown(tmp_path, mark)
         }
     )
     client.fail_attachment_urls.add("demo/2/diagram.png")
-    exporter = WikiExporter(client=client, settings=ExportSettings(output_path=tmp_path / "mirror"))
+    exporter = WikiExporter(
+        client=client,
+        settings=ExportSettings(output_path=tmp_path / "mirror", only_referenced_images=False),
+    )
     payload = exporter.sync_pages("ENG", (2,)).to_dict()
     assert payload["resourceIssues"][0]["reference"] == "unreferenced"
     assert payload["contentStatus"] == "complete"

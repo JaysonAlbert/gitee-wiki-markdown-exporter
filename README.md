@@ -63,7 +63,37 @@ pip install -e .
 
 ## Configuration
 
-Create `app_data.json` and point `GWME_CONFIG_PATH` at it:
+Installation does not create a configuration file, and there is no `config init` command.
+Create `app_data.json` yourself and either place it at the default location below, set
+`GWME_CONFIG_PATH`, or pass `--config-path` to a command. A minimal configuration for `sync` is:
+
+```json
+{
+  "auth": {
+    "gitee": {
+      "url": "https://gitee.example.com",
+      "tenant_id": "your-tenant"
+    }
+  },
+  "export": {"output_path": "./wiki-export"},
+  "sync": {"spaces": ["ENGINEERING"]}
+}
+```
+
+Set `GITEE_PROJECT_WIKI_ACCESS_TOKEN` in the environment before exporting. The required values
+are the Gitee base URL, tenant ID, output directory and a token (environment preferred).
+`sync.spaces` is required for `sync`; `spaces` and `pages` take their targets as command arguments.
+Relative output directories resolve against the configuration file's directory, not the shell's
+working directory. `--output-path` overrides a valid configured output directory; it does not
+remove the requirement to supply `export.output_path` in the file.
+
+Everything else can use built-in defaults: current-body image filtering, incremental skipping,
+stale-page cleanup, titles and breadcrumbs are enabled; YAML front matter is disabled; timeout
+is 30 seconds, TLS certificate verification is enabled, and the per-attachment limit is 50 MiB.
+Use `gw-export config --show --config-path ./app_data.json` to inspect resolved defaults with
+the token redacted. Pages containing draw.io components also require an installed local browser.
+
+The following example shows the common optional settings explicitly:
 
 ```json
 {
@@ -86,6 +116,7 @@ Create `app_data.json` and point `GWME_CONFIG_PATH` at it:
     "include_document_title": true,
     "include_yaml_frontmatter": false,
     "include_page_breadcrumbs": true,
+    "only_referenced_images": true,
     "skip_unchanged": true,
     "cleanup_stale": true,
     "lockfile_name": "gitee-wiki-lock.json",
@@ -238,13 +269,32 @@ These checks identify signatures and basic container structure, not every possib
 
 ### Resource references and diagnostics
 
-Attachment listing means page ownership, not current-body usage. All listed attachments continue
-to be archived. Each attachment is classified as `referenced`, `unreferenced`, or `unknown` from
-the current revision: image/link URLs and selected attachment-list IDs establish references;
+Attachment listing means page ownership, not current-body usage. By default, images confirmed
+unreferenced in the current page body are omitted. Each attachment is classified as `referenced`,
+`unreferenced`, or `unknown` from the current revision: image/link URLs and selected attachment-list
+IDs establish references;
 an attachment-list component without a selection displays all attachments. Unknown components or
 unsupported body syntax cannot establish absence. Image node IDs are not attachment IDs.
-These states do not describe references from other pages or historical revisions and never
-justify deleting an attachment.
+These states do not describe references from other pages or historical revisions.
+
+`export.only_referenced_images` defaults to `true` and omits listed image attachments confirmed
+`unreferenced` in the latest page body. Image filenames, URL extensions and declared image MIME
+types identify images. Referenced images, ordinary image links, selected attachment-list images,
+and non-image attachments are retained. Unknown reference states are retained conservatively;
+unsupported HTML/reference-link syntax or components may therefore keep extra images. Resources
+embedded in the current body and rendered draw.io diagrams continue to be exported.
+
+Set the option to `false` to archive all listed attachments. Upgrading an existing configuration
+that omits this key enables filtering too; explicitly set it to `false` before upgrading to retain
+full archival. Changing the effective policy refreshes selected pages once even when their
+revisions are unchanged. Enabling it removes newly excluded images only from
+those pages' previously managed files, inside the normal staging transaction; untracked files and
+unselected pages are preserved. This selected-page reconciliation also applies when `cleanup_stale`
+is false (that setting controls deletion of missing pages). Disabling the option restores full
+attachment archival on the next sync. Subsequent unchanged runs still poll all attachment metadata
+but do not refetch bodies or repeatedly attempt excluded images. Reference counts cover all listed
+attachments, including intentionally excluded images; those exclusions are not download errors.
+No remote attachment is deleted. This policy does not deduplicate images used by multiple pages.
 
 JSON results retain `status`, `errors`, and exit codes and add `resourceIssues`,
 `attachmentReferenceCounts`, and `contentStatus`. Each issue includes a page ID, resource kind,

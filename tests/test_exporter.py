@@ -793,7 +793,9 @@ def test_repeated_unchanged_sync_keeps_attachments_reusable(tmp_path: Path) -> N
 def test_attachment_changes_sync_without_a_page_revision_change(tmp_path: Path) -> None:
     client = FakeWikiClient()
     output = tmp_path / "mirror"
-    exporter = WikiExporter(client=client, settings=settings(output))
+    exporter = WikiExporter(
+        client=client, settings=ExportSettings(output_path=output, only_referenced_images=False)
+    )
     exporter.sync_spaces(("ENG",))
     client.revision_reads.clear()
     client.download_reads.clear()
@@ -849,7 +851,9 @@ def test_changed_attachment_redownloads_only_that_attachment(tmp_path: Path) -> 
         Attachment(99, "diagram.png", "demo/2/diagram.png", size=3),
     )
     output = tmp_path / "mirror"
-    exporter = WikiExporter(client=client, settings=settings(output))
+    exporter = WikiExporter(
+        client=client, settings=ExportSettings(output_path=output, only_referenced_images=False)
+    )
     exporter.sync_spaces(("ENG",))
     client.download_reads.clear()
     client.attachments[2] = (
