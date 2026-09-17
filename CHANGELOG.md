@@ -4,10 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.7.0 - 2026-09-17
+
 - Enable `export.only_referenced_images` by default to skip images confirmed unused by the current
   page body and reconcile previously managed images, while preserving unknown references,
   non-image attachments and incremental synchronization. Set the option to false for full archival;
   existing configurations that omit it also adopt filtering on upgrade.
+- Document the minimal first-install configuration, built-in defaults, and how to inspect
+  resolved settings without exposing credentials.
 
 ## 0.6.0 - 2026-09-16
 
