@@ -30,14 +30,8 @@ class InvalidImagePayload(ValueError):
     """The response does not contain a recognized image container."""
 
 
-def validate_image_payload(
-    content: bytes,
-    *,
-    name: str,
-    content_type: str | None,
-    declared_content_type: str | None = None,
-) -> None:
-    """Validate expected images; do not expose their content or URL in diagnostics."""
+def is_image_resource(name: str, *content_types: str | None) -> bool:
+    """Recognize image intent from a filename/URL or declared content types."""
     suffix = PurePosixPath(name).suffix.lower()
     if suffix not in _IMAGE_SUFFIXES:
         try:
@@ -46,9 +40,20 @@ def validate_image_payload(
             suffix = ""
     image_type = any(
         isinstance(value, str) and value.strip().lower().startswith("image/")
-        for value in (content_type, declared_content_type)
+        for value in content_types
     )
-    if suffix not in _IMAGE_SUFFIXES and not image_type:
+    return suffix in _IMAGE_SUFFIXES or image_type
+
+
+def validate_image_payload(
+    content: bytes,
+    *,
+    name: str,
+    content_type: str | None,
+    declared_content_type: str | None = None,
+) -> None:
+    """Validate expected images; do not expose their content or URL in diagnostics."""
+    if not is_image_resource(name, content_type, declared_content_type):
         return
     if not _is_image(content):
         raise InvalidImagePayload(f"invalid_image_payload: {_failure_reason(content)}")

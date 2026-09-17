@@ -140,10 +140,28 @@ not imply a change to the live mirror. `--json` stdout and existing exit codes r
 Reference analysis owns current-revision attachment usage independently of download success.
 The manifest retains versioned `attachmentReferences` for every listed attachment, including
 failed downloads. Existing manifests are refreshed once; unchanged pages reuse classifications
-only with matching revision, metadata and reference-analysis version. Whole-list archival,
-transactional staging and managed cleanup are unchanged. Unknown schemas conservatively retain
+only with matching revision, metadata and reference-analysis version. Current-body image selection is
+the default; whole-list archival is available by disabling the policy. Unknown schemas conservatively retain
 unknown references. Structured issues are accumulated for this selection only; incoming-link
 repairs on other pages do not count as fresh remote validation.
+
+### Current-body image selection
+
+`export.only_referenced_images` defaults to true and applies reference classifications before listed-attachment
+download/reuse: only known images classified `unreferenced` are excluded. Non-images and unknown
+usage remain included. Existing body-resource discovery and diagram rendering are unchanged.
+Selection is part of the render-settings and first-sync checkpoint fingerprints. A filtered
+page records an `attachmentListingHash` over every listed attachment's normalized metadata,
+including excluded images. This hash and the existing reference version/revision checks guard
+reuse of classifications; downloaded-file checks apply only to included attachments. Metadata
+changes for an excluded image therefore trigger reclassification without creating a perpetual
+refresh loop for intentionally absent files.
+
+Only downloaded resources appear in the managed `attachments` list. On policy or revision
+changes, existing selected-page reconciliation removes newly excluded managed paths in staging;
+the previous live mirror remains intact on failure. Unselected pages and untracked files are
+preserved. Switching the setting off restores the original archival policy. See
+[the scoped design](referenced-image-export.md) for acceptance and rollback boundaries.
 
 Image validation distinguishes invalid content from container compatibility. Safe standard SVG
 DOCTYPE declarations are stripped for parsing with no DTD fetching; ENTITY and custom declarations

@@ -62,6 +62,7 @@ class ExportSettings:
     cleanup_stale: bool = True
     lockfile_name: str = "gitee-wiki-lock.json"
     max_attachment_bytes: int = 50 * 1024 * 1024
+    only_referenced_images: bool = True
 
     def with_output_path(self, output_path: Path | None) -> ExportSettings:
         """Return settings with an optional CLI output override."""
@@ -170,6 +171,10 @@ def load_settings(path: Path | None = None) -> Settings:
                 export_data.get("max_attachment_bytes", 50 * 1024 * 1024),
                 "export.max_attachment_bytes",
             ),
+            only_referenced_images=_boolean(
+                export_data.get("only_referenced_images", True),
+                "export.only_referenced_images",
+            ),
         ),
         sync=SyncSettings(spaces=_string_tuple(sync_data.get("spaces", []), "sync.spaces")),
         config_path=actual_path.resolve(),
@@ -210,6 +215,7 @@ def safe_settings_dict(settings: Settings) -> dict[str, object]:
             "cleanup_stale": settings.export.cleanup_stale,
             "lockfile_name": settings.export.lockfile_name,
             "max_attachment_bytes": settings.export.max_attachment_bytes,
+            "only_referenced_images": settings.export.only_referenced_images,
         },
         "sync": {"spaces": list(settings.sync.spaces)},
     }

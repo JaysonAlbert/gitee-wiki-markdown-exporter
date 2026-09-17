@@ -35,7 +35,11 @@ from gitee_wiki_markdown_exporter.diagram import (
     DiagramRenderer,
     DiagramRenderError,
 )
-from gitee_wiki_markdown_exporter.image_payloads import InvalidImagePayload, validate_image_payload
+from gitee_wiki_markdown_exporter.image_payloads import (
+    InvalidImagePayload,
+    is_image_resource,
+    validate_image_payload,
+)
 from gitee_wiki_markdown_exporter.manifest import (
     ManifestError,
     empty_manifest,
@@ -213,6 +217,7 @@ def _checkpoint_fingerprint(
             "cleanupStale": settings.cleanup_stale,
             "lockfileName": settings.lockfile_name,
             "maxAttachmentBytes": settings.max_attachment_bytes,
+            "onlyReferencedImages": settings.only_referenced_images,
         },
         "selections": [
             {
@@ -861,6 +866,10 @@ class WikiExporter:
                 if reference in self._reference_counts:
                     self._reference_counts[reference] += 1
             entry["renderSettings"] = render_settings
+            if self.settings.only_referenced_images:
+                entry["attachmentListingHash"] = _attachment_listing_hash(remote_state.attachments)
+            else:
+                entry.pop("attachmentListingHash", None)
             entry["breadcrumbHash"] = hashlib.sha256(breadcrumbs.encode("utf-8")).hexdigest()
             next_pages[page_key] = entry
             if checkpoint is not None:
@@ -902,6 +911,21 @@ class WikiExporter:
             attachments=self.client.list_attachments(page_id),
         )
 
+    def _included_attachments(
+        self, attachments: tuple[Attachment, ...], references: object
+    ) -> tuple[Attachment, ...]:
+        if not self.settings.only_referenced_images or not isinstance(references, dict):
+            return attachments
+        return tuple(
+            attachment
+            for attachment in attachments
+            if references.get(str(attachment.id)) != "unreferenced"
+            or not (
+                is_image_resource(attachment.name, attachment.content_type)
+                or is_image_resource(attachment.url)
+            )
+        )
+
     def _sync_page(
         self,
         *,
@@ -937,7 +961,9 @@ class WikiExporter:
         attachments_unchanged = _attachments_match(
             staging=staging,
             old_attachments=old_attachments,
-            current_attachments=attachments,
+            current_attachments=self._included_attachments(
+                attachments, old_entry.get("attachmentReferences")
+            ),
             valid_resource=valid_resource,
         )
         base_unchanged = (
@@ -947,6 +973,11 @@ class WikiExporter:
             and isinstance(old_entry.get("attachmentReferences"), dict)
             and set(old_entry["attachmentReferences"]) == {str(a.id) for a in attachments}
             and all(v in REFERENCE_STATES for v in old_entry["attachmentReferences"].values())
+            and (
+                not self.settings.only_referenced_images
+                or old_entry.get("attachmentListingHash") is not None
+                and old_entry["attachmentListingHash"] == _attachment_listing_hash(attachments)
+            )
             and old_revision == str(revision)
             and old_entry.get("rendererVersion") == _MARKDOWN_RENDERER_VERSION
             and old_entry.get("renderSettings") == render_settings
@@ -1014,7 +1045,7 @@ class WikiExporter:
         attachment_links: dict[int, tuple[str, str]] = {}
         listed_attachment_url_paths: set[str] = set()
         old_by_id = _attachment_entries_by_id(old_attachments)
-        for attachment in attachments:
+        for attachment in self._included_attachments(attachments, references):
             try:
                 url_path = _attachment_url_path(attachment.url)
                 if not _attachment_same_origin(attachment.url, self.client.base_url):
@@ -1601,6 +1632,9 @@ def _render_settings(settings: ExportSettings, client: WikiReader) -> str:
         "base": client.base_url,
         "tenant": str(getattr(client, "tenant_id", "")),
     }
+    # Preserve the legacy fingerprint when full archival is explicitly selected.
+    if settings.only_referenced_images:
+        values["onlyReferencedImages"] = True
     return hashlib.sha256(json.dumps(values, sort_keys=True).encode("utf-8")).hexdigest()
 
 
@@ -1942,16 +1976,30 @@ def _diagrams_exist(staging: Path, value: object) -> bool:
     )
 
 
-def _attachment_metadata(attachment: Attachment, attachment_path: Path) -> dict[str, object]:
-    return {
+def _attachment_metadata(
+    attachment: Attachment, attachment_path: Path | None = None
+) -> dict[str, object]:
+    metadata: dict[str, object] = {
         "id": attachment.id,
         "name": attachment.name,
-        "path": attachment_path.as_posix(),
         "urlPath": _attachment_url_path(attachment.url),
         "remoteSize": attachment.size,
         "remoteContentType": attachment.content_type,
         "remoteUpdatedAt": attachment.updated_at,
     }
+    if attachment_path is not None:
+        metadata["path"] = attachment_path.as_posix()
+    return metadata
+
+
+def _attachment_listing_hash(attachments: tuple[Attachment, ...]) -> str | None:
+    """Track excluded metadata without claiming that excluded files were downloaded."""
+    try:
+        metadata = [_attachment_metadata(a) for a in sorted(attachments, key=lambda a: a.id)]
+    except ValueError:
+        # Malformed URLs retain the normal per-resource partial-error path.
+        return None
+    return hashlib.sha256(json.dumps(metadata, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def _attachment_metadata_matches(entry: dict[str, Any], attachment: Attachment) -> bool:
